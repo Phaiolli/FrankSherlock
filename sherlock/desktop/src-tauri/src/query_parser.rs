@@ -121,7 +121,7 @@ pub fn parse_query(raw_query: &str) -> ParsedQuery {
 
     // Strip matched media keywords from query text, longest patterns first
     let mut query_text = working_query.clone();
-    matched_patterns.sort_by(|a, b| b.1.cmp(&a.1));
+    matched_patterns.sort_by_key(|(_, len)| std::cmp::Reverse(*len));
     for (re, _) in &matched_patterns {
         query_text = re.replace_all(&query_text, " ").to_string();
     }

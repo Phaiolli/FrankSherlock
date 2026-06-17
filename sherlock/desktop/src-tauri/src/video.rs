@@ -109,14 +109,13 @@ pub fn extract_metadata(video_path: &Path) -> Option<VideoMetadata> {
         for s in streams {
             let codec_type = s.codec_type.as_deref().unwrap_or("");
             match codec_type {
-                "video" => {
-                    if meta.video_codec.is_none() {
-                        meta.video_codec = s.codec_name.clone();
-                        meta.width = s.width;
-                        meta.height = s.height;
-                        meta.framerate = parse_framerate(s.r_frame_rate.as_deref());
-                    }
+                "video" if meta.video_codec.is_none() => {
+                    meta.video_codec = s.codec_name.clone();
+                    meta.width = s.width;
+                    meta.height = s.height;
+                    meta.framerate = parse_framerate(s.r_frame_rate.as_deref());
                 }
+                "video" => {}
                 "audio" => {
                     meta.audio_stream_count += 1;
                     if meta.audio_codec.is_none() {

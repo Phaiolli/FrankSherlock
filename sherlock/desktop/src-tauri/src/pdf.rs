@@ -128,11 +128,7 @@ pub fn find_content_pages(
                 count_pixels += 1;
             }
         }
-        let mean_brightness = if count_pixels > 0 {
-            total / count_pixels
-        } else {
-            255
-        };
+        let mean_brightness = total.checked_div(count_pixels).unwrap_or(255);
 
         if mean_brightness <= 250 {
             result.push(idx);
