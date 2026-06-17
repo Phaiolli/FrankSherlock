@@ -1,6 +1,7 @@
 #[cfg(not(target_os = "macos"))]
 use std::process::Stdio;
 
+#[cfg(not(target_os = "macos"))]
 use super::process::silent_command;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
