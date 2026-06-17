@@ -5997,24 +5997,6 @@ mod tests {
 
     // ── Clustering invariant tests ────────────────────────────────────
 
-    /// Helper: insert a test face with specific embedding + confidence + bbox size.
-    fn insert_test_face_full(
-        db_path: &std::path::Path,
-        file_id: i64,
-        embedding: &[f32],
-        confidence: f32,
-        bbox_size: f32,
-    ) -> i64 {
-        let face = crate::face::FaceDetection {
-            bbox: [10.0, 10.0, 10.0 + bbox_size, 10.0 + bbox_size],
-            confidence,
-            keypoints: [[0.0; 2]; 5],
-            embedding: embedding.to_vec(),
-        };
-        let ids = insert_face_detections(db_path, file_id, &[face]).expect("insert faces");
-        ids[0]
-    }
-
     /// Make a random-ish embedding near a base direction.
     fn make_similar_embedding(base: &[f32], noise: f32, seed: u32) -> Vec<f32> {
         let mut emb = base.to_vec();
@@ -6606,7 +6588,7 @@ mod tests {
         let fid3 = file_id_by_path(&db_path, root_id, "ra3.jpg");
 
         let face1 = insert_test_face(&db_path, fid1, &emb_a);
-        let face2 = insert_test_face(&db_path, fid2, &emb_a);
+        let _face2 = insert_test_face(&db_path, fid2, &emb_a);
         let face3 = insert_test_face(&db_path, fid3, &emb_b);
 
         cluster_faces(&db_path, 0.30).expect("cluster");

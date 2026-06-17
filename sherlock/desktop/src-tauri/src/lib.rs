@@ -177,11 +177,9 @@ fn parse_query_nl(query: String) -> models::ParsedQuery {
 #[tauri::command]
 async fn get_setup_status(state: State<'_, AppState>) -> Result<SetupStatus, String> {
     let app_state = state.inner().clone();
-    Ok(
-        tauri::async_runtime::spawn_blocking(move || compute_setup_status(&app_state))
-            .await
-            .map_err(|e| e.to_string())?,
-    )
+    tauri::async_runtime::spawn_blocking(move || compute_setup_status(&app_state))
+        .await
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -354,11 +352,11 @@ fn list_active_scans(state: State<'_, AppState>) -> Result<Vec<ScanJobStatus>, S
 #[tauri::command]
 async fn get_runtime_status(state: State<'_, AppState>) -> Result<RuntimeStatus, String> {
     let app_state = state.inner().clone();
-    Ok(tauri::async_runtime::spawn_blocking(move || {
+    tauri::async_runtime::spawn_blocking(move || {
         runtime::gather_runtime_status(app_state.gpu_info())
     })
     .await
-    .map_err(|e| e.to_string())?)
+    .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
