@@ -6,6 +6,7 @@ mod exif;
 mod face;
 mod llm;
 mod models;
+mod organize;
 mod pdf;
 mod platform;
 mod query_parser;
@@ -13,21 +14,22 @@ mod runtime;
 mod scan;
 mod similarity;
 mod thumbnail;
+mod vault;
 mod video;
 mod video_server;
 
 use std::collections::{HashMap, HashSet};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use config::{prepare_dirs, resolve_paths, AppPaths};
 use error::AppError;
 use models::{
-    Album, DeleteFilesResult, DuplicatesResponse, HealthCheckOutcome, HealthStatus, PdfPassword,
+    Album, CreateVaultResult, DeleteFilesResult, OrganizeResult, DuplicatesResponse, HealthCheckOutcome, HealthStatus, PdfPassword,
     ProtectedPdfInfo, PurgeResult, RenameFileResult, RetryProtectedPdfsResult, RootInfo,
     RuntimeStatus, ScanJobStatus, SearchRequest, SearchResponse, SetupDownloadStatus, SetupStatus,
-    SmartFolder, SubdirEntry, VenvProvisionStatus,
+    SmartFolder, SubdirEntry, VaultProbe, VaultSupport, VenvProvisionStatus,
 };
 use tauri::Manager;
 use tauri::State;
@@ -315,6 +317,7 @@ fn start_scan(
     app_handle: tauri::AppHandle,
 ) -> Result<ScanJobStatus, String> {
     require_writable(state.inner())?;
+    vault::ensure_scannable(&state.paths.db_file, &root_path).map_err(|e| e.to_string())?;
     let skip = skip_classify.unwrap_or(false);
 
     // Only require Ollama setup for full scans (not metadata-only refreshes)
@@ -377,6 +380,14 @@ fn cancel_scan(job_id: i64, state: State<'_, AppState>) -> Result<bool, String> 
 #[tauri::command]
 fn remove_root(root_id: i64, state: State<'_, AppState>) -> Result<PurgeResult, String> {
     require_writable(state.inner())?;
+    // A vault must be unmounted before its root row disappears. The encrypted
+    // store on disk is intentionally left untouched (user data).
+    if db::get_vault_root(&state.paths.db_file, root_id)
+        .map_err(|e| e.to_string())?
+        .is_some()
+    {
+        vault::lock_vault(&state.paths.db_file, root_id).map_err(|e| e.to_string())?;
+    }
     // If this root has a parent root, reassign files back instead of deleting
     if let Some(_parent_id) =
         db::reassign_to_parent_root(&state.paths.db_file, root_id).map_err(|e| e.to_string())?
@@ -913,7 +924,10 @@ fn detect_faces(
 
     let db_path = state.paths.db_file.clone();
     let models_dir = state.paths.models_dir.clone();
-    let face_crops_dir = state.paths.face_crops_dir.clone();
+    // Face crops of a vault stay inside the vault so they are encrypted at rest.
+    let face_crops_dir = vault_cache_dir_for_root(&state.paths.db_file, root_id)
+        .map(|d| d.join("face_crops"))
+        .unwrap_or_else(|| state.paths.face_crops_dir.clone());
     let progress_arc = state.face_detect_progress.clone();
     let cancel_flag = state.face_detect_cancel.clone();
     let ort_lib_dir = resolve_ort_lib(&app_handle);
@@ -1575,6 +1589,132 @@ fn resolve_pdfium_lib(app_handle: &tauri::AppHandle) -> std::path::PathBuf {
     std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("lib")
 }
 
+/// `<root>/.frank_sherlock` when `root_id` is a vault, else `None`.
+fn vault_cache_dir_for_root(db_path: &Path, root_id: i64) -> Option<PathBuf> {
+    db::get_vault_root(db_path, root_id)
+        .ok()
+        .flatten()
+        .map(|v| vault::cache_dir(Path::new(&v.root_path)))
+}
+
+/// True while a scan or face-detection job is running for `root_id`.
+fn root_has_running_work(state: &AppState, root_id: i64) -> bool {
+    let job_ids: Vec<i64> = state
+        .running_scan_jobs
+        .lock()
+        .expect("scan job mutex poisoned")
+        .iter()
+        .copied()
+        .collect();
+    let scanning = job_ids.into_iter().any(|jid| {
+        db::get_scan_job(&state.paths.db_file, jid)
+            .ok()
+            .flatten()
+            .is_some_and(|j| j.root_id == root_id)
+    });
+    if scanning {
+        return true;
+    }
+    state
+        .face_detect_progress
+        .lock()
+        .expect("face progress mutex poisoned")
+        .as_ref()
+        .is_some_and(|p| p.root_id == root_id)
+}
+
+#[tauri::command]
+fn get_vault_support() -> VaultSupport {
+    vault::support()
+}
+
+#[tauri::command]
+async fn create_vault(
+    folder_path: String,
+    password: String,
+    state: State<'_, AppState>,
+) -> Result<CreateVaultResult, String> {
+    require_writable(state.inner())?;
+    let db_path = state.paths.db_file.clone();
+    tauri::async_runtime::spawn_blocking(move || vault::create_vault(&db_path, &folder_path, &password))
+        .await
+        .map_err(|e| AppError::Join(e.to_string()).to_string())?
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn organize_root_by_people(
+    root_id: i64,
+    state: State<'_, AppState>,
+) -> Result<OrganizeResult, String> {
+    require_writable(state.inner())?;
+    if root_has_running_work(state.inner(), root_id) {
+        return Err("Wait for the running scan to finish before organizing".to_string());
+    }
+    let root = db::get_root(&state.paths.db_file, root_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "folder not found".to_string())?;
+    vault::ensure_scannable(&state.paths.db_file, &root.root_path).map_err(|e| e.to_string())?;
+    let thumbnails_dir = vault_cache_dir_for_root(&state.paths.db_file, root_id)
+        .map(|d| d.join("thumbnails"))
+        .unwrap_or_else(|| state.paths.thumbnails_dir.clone());
+    let db_path = state.paths.db_file.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        organize::organize_root_by_people(&db_path, root_id, &thumbnails_dir)
+    })
+    .await
+    .map_err(|e| AppError::Join(e.to_string()).to_string())?
+    .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn probe_vault(folder_path: String) -> VaultProbe {
+    vault::probe(&folder_path)
+}
+
+#[tauri::command]
+async fn attach_vault(
+    folder_path: String,
+    password: String,
+    state: State<'_, AppState>,
+) -> Result<CreateVaultResult, String> {
+    require_writable(state.inner())?;
+    let db_path = state.paths.db_file.clone();
+    tauri::async_runtime::spawn_blocking(move || vault::attach_vault(&db_path, &folder_path, &password))
+        .await
+        .map_err(|e| AppError::Join(e.to_string()).to_string())?
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn unlock_vault(
+    root_id: i64,
+    password: String,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    require_writable(state.inner())?;
+    let db_path = state.paths.db_file.clone();
+    tauri::async_runtime::spawn_blocking(move || vault::unlock_vault(&db_path, root_id, &password))
+        .await
+        .map_err(|e| AppError::Join(e.to_string()).to_string())?
+        .map(|_| ())
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn lock_vault(root_id: i64, state: State<'_, AppState>) -> Result<(), String> {
+    require_writable(state.inner())?;
+    if root_has_running_work(state.inner(), root_id) {
+        return Err("Wait for the running scan to finish (or pause it) before locking".to_string());
+    }
+    let db_path = state.paths.db_file.clone();
+    tauri::async_runtime::spawn_blocking(move || vault::lock_vault(&db_path, root_id))
+        .await
+        .map_err(|e| AppError::Join(e.to_string()).to_string())?
+        .map(|_| ())
+        .map_err(|e| e.to_string())
+}
+
 fn build_scan_context(app_state: &AppState, app_handle: &tauri::AppHandle) -> models::ScanContext {
     let surya_script = resolve_surya_script(app_handle);
     let pdfium_lib_path = resolve_pdfium_lib(app_handle);
@@ -1616,7 +1756,15 @@ fn spawn_scan_worker_if_needed(
         flags.insert(job_id, cancel_flag.clone());
     }
 
-    let scan_ctx = build_scan_context(&app_state, app_handle);
+    let mut scan_ctx = build_scan_context(&app_state, app_handle);
+    // Thumbnails of a vault are written inside the vault (encrypted at rest).
+    if let Some(cache) = db::get_scan_job(&app_state.paths.db_file, job_id)
+        .ok()
+        .flatten()
+        .and_then(|job| vault_cache_dir_for_root(&app_state.paths.db_file, job.root_id))
+    {
+        scan_ctx.thumbnails_dir = cache.join("thumbnails");
+    }
     let jobs = app_state.running_scan_jobs.clone();
     let cancel_flags = app_state.cancel_flags.clone();
     let app_state_for_task = app_state.clone();
@@ -1691,6 +1839,11 @@ pub fn run() {
                     }
                 }
 
+                // Vaults are always locked when the app starts, even after a crash.
+                if let Err(e) = vault::lock_all_vaults(&paths.db_file) {
+                    log::warn!("Locking vaults at startup failed: {e}");
+                }
+
                 match db::validate_and_purge_stale_roots(&paths.db_file, &paths.thumbnails_dir) {
                     Ok(purged) => {
                         for root in &purged {
@@ -1760,9 +1913,13 @@ pub fn run() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
         .manage(app_state)
-        .on_window_event(|_window, event| {
+        .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { .. } = event {
                 let _ = llm::cleanup_loaded_models();
+                let state = window.state::<AppState>();
+                if let Err(e) = vault::lock_all_vaults(&state.paths.db_file) {
+                    log::warn!("Locking vaults on window close failed: {e}");
+                }
             }
         })
         // CLI folder handling is delegated to the frontend via get_cli_folder_path.
@@ -1802,6 +1959,13 @@ pub fn run() {
             delete_smart_folder,
             list_smart_folders,
             reorder_roots,
+            get_vault_support,
+            organize_root_by_people,
+            probe_vault,
+            create_vault,
+            attach_vault,
+            unlock_vault,
+            lock_vault,
             reorder_albums,
             reorder_smart_folders,
             add_pdf_password,
@@ -1828,6 +1992,14 @@ pub fn run() {
             reassign_faces_to_person,
             set_representative_face
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|app_handle, event| {
+            if let tauri::RunEvent::Exit = event {
+                let state = app_handle.state::<AppState>();
+                if let Err(e) = vault::lock_all_vaults(&state.paths.db_file) {
+                    log::warn!("Locking vaults at exit failed: {e}");
+                }
+            }
+        });
 }

@@ -17,9 +17,12 @@ type RootCardProps = {
   onCancelScan?: () => void;
   onResumeScan?: () => void;
   onCancelFaceDetect?: () => void;
+  onUnlockVault?: () => void;
+  onLockVault?: () => void;
+  onOrganize?: () => void;
 };
 
-export default function RootCard({ root, isSelected, scan, readOnly, faceProgress, onSelect, onDelete, onRescan, onRefresh, onCopyPath, onDetectFaces, onCancelScan, onResumeScan, onCancelFaceDetect }: RootCardProps) {
+export default function RootCard({ root, isSelected, scan, readOnly, faceProgress, onSelect, onDelete, onRescan, onRefresh, onCopyPath, onDetectFaces, onCancelScan, onResumeScan, onCancelFaceDetect, onUnlockVault, onLockVault, onOrganize }: RootCardProps) {
   const [showMenu, setShowMenu] = useState(false);
   const [menuPos, setMenuPos] = useState({ x: 0, y: 0 });
   const menuRef = useRef<HTMLDivElement>(null);
@@ -72,10 +75,11 @@ export default function RootCard({ root, isSelected, scan, readOnly, faceProgres
   }, [showMenu, closeMenu]);
 
   const eta = scan?.status === "running" ? computeEta(scan) : null;
+  const locked = root.isVault && root.vaultLocked;
 
   return (
     <div
-      className={`root-card${isSelected ? " selected" : ""}`}
+      className={`root-card${isSelected ? " selected" : ""}${root.isVault ? " root-card-vault" : ""}${locked ? " root-card-locked" : ""}`}
       onClick={onSelect}
       onContextMenu={handleContextMenu}
       title={root.rootPath}
@@ -90,11 +94,23 @@ export default function RootCard({ root, isSelected, scan, readOnly, faceProgres
     >
       <div className="root-card-header">
         <span className="root-card-icon">
-          <svg width="16" height="16" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
-            <path d="M1.5 3C1.5 2.17 2.17 1.5 3 1.5h3.59a1.5 1.5 0 011.06.44L8.71 3H13a1.5 1.5 0 011.5 1.5v8A1.5 1.5 0 0113 14H3a1.5 1.5 0 01-1.5-1.5V3z" fill="#5AC8FA"/>
-            <path d="M1.5 5.5h13v7a1.5 1.5 0 01-1.5 1.5H3a1.5 1.5 0 01-1.5-1.5v-7z" fill="#34AADC"/>
-            <path d="M1.5 5.5h13v1H1.5z" fill="rgba(0,0,0,0.08)"/>
-          </svg>
+          {root.isVault ? (
+            <svg width="16" height="16" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg" aria-label={locked ? "Locked secret folder" : "Unlocked secret folder"} role="img">
+              <path d="M1.5 3C1.5 2.17 2.17 1.5 3 1.5h3.59a1.5 1.5 0 011.06.44L8.71 3H13a1.5 1.5 0 011.5 1.5v8A1.5 1.5 0 0113 14H3a1.5 1.5 0 01-1.5-1.5V3z" fill={locked ? "#8E8E93" : "#C9A227"}/>
+              <path d="M1.5 5.5h13v7a1.5 1.5 0 01-1.5 1.5H3a1.5 1.5 0 01-1.5-1.5v-7z" fill={locked ? "#6D6D72" : "#B08D1E"}/>
+              {locked ? (
+                <path d="M8 7.2a1.6 1.6 0 00-1.6 1.6v.6H6a.6.6 0 00-.6.6v2.2c0 .33.27.6.6.6h4a.6.6 0 00.6-.6V10a.6.6 0 00-.6-.6h-.4v-.6A1.6 1.6 0 008 7.2zm0 .9c.39 0 .7.31.7.7v.6H7.3v-.6c0-.39.31-.7.7-.7z" fill="#fff"/>
+              ) : (
+                <path d="M8 7.2a1.6 1.6 0 00-1.6 1.6h.9c0-.39.31-.7.7-.7.39 0 .7.31.7.7v.6H6a.6.6 0 00-.6.6v2.2c0 .33.27.6.6.6h4a.6.6 0 00.6-.6V10a.6.6 0 00-.6-.6h-.4v-.6A1.6 1.6 0 008 7.2z" fill="#fff"/>
+              )}
+            </svg>
+          ) : (
+            <svg width="16" height="16" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
+              <path d="M1.5 3C1.5 2.17 2.17 1.5 3 1.5h3.59a1.5 1.5 0 011.06.44L8.71 3H13a1.5 1.5 0 011.5 1.5v8A1.5 1.5 0 0113 14H3a1.5 1.5 0 01-1.5-1.5V3z" fill="#5AC8FA"/>
+              <path d="M1.5 5.5h13v7a1.5 1.5 0 01-1.5 1.5H3a1.5 1.5 0 01-1.5-1.5v-7z" fill="#34AADC"/>
+              <path d="M1.5 5.5h13v1H1.5z" fill="rgba(0,0,0,0.08)"/>
+            </svg>
+          )}
         </span>
         <span className="root-card-name" title={root.rootPath}>{root.rootName}</span>
         {!readOnly && (
@@ -109,7 +125,20 @@ export default function RootCard({ root, isSelected, scan, readOnly, faceProgres
       </div>
       <div className="root-card-meta">
         <span>{root.fileCount.toLocaleString()} files</span>
+        {root.isVault && (
+          <span className={`root-card-vault-badge${locked ? " locked" : ""}`}>{locked ? "Locked" : "Unlocked"}</span>
+        )}
       </div>
+      {root.isVault && !readOnly && locked && onUnlockVault && (
+        <div className="root-card-scan">
+          <button type="button" className="root-card-scan-btn root-card-vault-btn" onClick={(e) => { e.stopPropagation(); onUnlockVault(); }}>Unlock</button>
+        </div>
+      )}
+      {root.isVault && !readOnly && !locked && onLockVault && !scan && (
+        <div className="root-card-scan">
+          <button type="button" className="root-card-scan-btn root-card-vault-btn" onClick={(e) => { e.stopPropagation(); onLockVault(); }}>Lock</button>
+        </div>
+      )}
       {scan?.status === "running" && scan.phase === "discovering" && (
         <div className="root-card-scan">
           <div className="root-card-discovery-bar" />
@@ -178,10 +207,23 @@ export default function RootCard({ root, isSelected, scan, readOnly, faceProgres
           role="menu"
         >
           <button role="menuitem" onClick={(e) => { e.stopPropagation(); onCopyPath(); setShowMenu(false); }}>Copy Path</button>
-          <button role="menuitem" onClick={(e) => { e.stopPropagation(); onRefresh(); setShowMenu(false); }}>Refresh Metadata</button>
-          <button role="menuitem" onClick={(e) => { e.stopPropagation(); onRescan(); setShowMenu(false); }}>Rescan</button>
-          {onDetectFaces && (
-            <button role="menuitem" onClick={(e) => { e.stopPropagation(); onDetectFaces(); setShowMenu(false); }}>Detect Faces</button>
+          {locked && onUnlockVault && (
+            <button role="menuitem" onClick={(e) => { e.stopPropagation(); onUnlockVault(); setShowMenu(false); }}>Unlock</button>
+          )}
+          {root.isVault && !locked && onLockVault && (
+            <button role="menuitem" onClick={(e) => { e.stopPropagation(); onLockVault(); setShowMenu(false); }}>Lock</button>
+          )}
+          {!locked && (
+            <>
+              <button role="menuitem" onClick={(e) => { e.stopPropagation(); onRefresh(); setShowMenu(false); }}>Refresh Metadata</button>
+              <button role="menuitem" onClick={(e) => { e.stopPropagation(); onRescan(); setShowMenu(false); }}>Rescan</button>
+              {onDetectFaces && (
+                <button role="menuitem" onClick={(e) => { e.stopPropagation(); onDetectFaces(); setShowMenu(false); }}>Detect Faces</button>
+              )}
+              {onOrganize && (
+                <button role="menuitem" onClick={(e) => { e.stopPropagation(); onOrganize(); setShowMenu(false); }}>Organize by People</button>
+              )}
+            </>
           )}
           <button role="menuitem" className="danger" onClick={(e) => { e.stopPropagation(); onDelete(); setShowMenu(false); }}>Remove</button>
         </div>

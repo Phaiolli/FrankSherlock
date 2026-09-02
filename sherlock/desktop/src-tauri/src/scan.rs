@@ -93,6 +93,9 @@ fn run_scan_job_internal(
             }
         })
         .collect();
+    // Never index the app's own cache directory inside a vault.
+    let mut excluded_prefixes = excluded_prefixes;
+    excluded_prefixes.push(root_path.join(crate::vault::CACHE_DIR_NAME));
 
     // Phase 1: Load existing DB records
     let db_load_start = Instant::now();

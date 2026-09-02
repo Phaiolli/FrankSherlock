@@ -8,9 +8,10 @@ use rusqlite_migration::{HookError, Migrations, M};
 use crate::error::{AppError, AppResult};
 use crate::models::{
     Album, DbStats, DuplicateFile, DuplicateGroup, DuplicatesResponse, ExistingFile, FileMetadata,
-    FileProperties, FileRecordUpsert, HealthCheckOutcome, ParsedQuery, PdfPassword,
+    FileProperties, FileRecordUpsert, FileWithPersons, HealthCheckOutcome, ParsedQuery, PdfPassword,
     ProtectedPdfInfo, PurgeResult, RootInfo, ScanJobState, ScanJobStatus, SearchItem,
     SearchRequest, SearchResponse, SmartFolder, SortField, SortOrder, SubdirEntry,
+    VaultFaceSnapshot, VaultFileSnapshot, VaultIndexSnapshot, VaultJobCursor, VaultRoot,
 };
 use crate::query_parser::parse_query;
 
@@ -292,6 +293,21 @@ fn run_migrations(conn: &mut Connection) -> AppResult<()> {
             CREATE INDEX IF NOT EXISTS idx_people_name ON people(name COLLATE NOCASE);
             "#,
         ),
+        // Migration 13: Encrypted vault roots (gocryptfs). vault_cipher_dir is
+        // NULL for normal roots; vault_locked hides a vault's files everywhere.
+        M::up(
+            r#"
+            ALTER TABLE roots ADD COLUMN vault_cipher_dir TEXT;
+            ALTER TABLE roots ADD COLUMN vault_locked INTEGER NOT NULL DEFAULT 0;
+            "#,
+        ),
+        // Migration 14: vault_scrubbed marks a vault whose index rows are
+        // blanked in the DB (the real data is sealed inside the vault).
+        M::up(
+            r#"
+            ALTER TABLE roots ADD COLUMN vault_scrubbed INTEGER NOT NULL DEFAULT 0;
+            "#,
+        ),
     ]);
 
     migrations
@@ -311,6 +327,11 @@ pub fn recover_incomplete_scan_jobs(db_path: &Path) -> AppResult<u64> {
     )?;
     Ok(updated as u64)
 }
+
+/// SQL predicate (on alias `f`) that hides files belonging to locked vaults.
+/// Every user-facing listing must include it alongside `f.deleted_at IS NULL`.
+pub const VISIBLE_ROOT_FILTER: &str =
+    "f.root_id NOT IN (SELECT id FROM roots WHERE vault_locked = 1)";
 
 pub fn database_stats(db_path: &Path) -> AppResult<DbStats> {
     let conn = open_conn(db_path)?;
@@ -1038,10 +1059,12 @@ pub fn list_roots(db_path: &Path) -> AppResult<Vec<RootInfo>> {
     let conn = open_conn(db_path)?;
     let mut stmt = conn.prepare(
         "SELECT r.id, r.root_path, r.root_name, r.created_at, r.last_scan_at,
-                (SELECT COUNT(*) FROM files f WHERE f.root_id = r.id AND f.deleted_at IS NULL)
+                (SELECT COUNT(*) FROM files f WHERE f.root_id = r.id AND f.deleted_at IS NULL),
+                r.vault_cipher_dir IS NOT NULL, r.vault_locked
          FROM roots r ORDER BY r.sort_order, r.id",
     )?;
     let rows = stmt.query_map([], |row| {
+        let is_vault: bool = row.get(6)?;
         Ok(RootInfo {
             id: row.get(0)?,
             root_path: row.get(1)?,
@@ -1049,6 +1072,8 @@ pub fn list_roots(db_path: &Path) -> AppResult<Vec<RootInfo>> {
             created_at: row.get(3)?,
             last_scan_at: row.get(4)?,
             file_count: row.get::<_, i64>(5)? as u64,
+            is_vault,
+            vault_locked: is_vault && row.get::<_, bool>(7)?,
         })
     })?;
     let mut out = Vec::new();
@@ -1056,6 +1081,515 @@ pub fn list_roots(db_path: &Path) -> AppResult<Vec<RootInfo>> {
         out.push(row?);
     }
     Ok(out)
+}
+
+pub fn get_root(db_path: &Path, root_id: i64) -> AppResult<Option<RootInfo>> {
+    Ok(list_roots(db_path)?.into_iter().find(|r| r.id == root_id))
+}
+
+// ---------------------------------------------------------------------------
+// Organize by people
+// ---------------------------------------------------------------------------
+
+/// Every visible file of `root_id` that has at least one face assigned to a
+/// person, with the people recognised in it (sorted by name, deduplicated).
+pub fn list_files_with_persons(db_path: &Path, root_id: i64) -> AppResult<Vec<FileWithPersons>> {
+    let conn = open_conn(db_path)?;
+    let mut stmt = conn.prepare(
+        "SELECT f.id, f.rel_path, f.abs_path, f.thumb_path, p.id, p.name, f.fingerprint
+         FROM files f
+         JOIN face_detections fd ON fd.file_id = f.id
+         JOIN people p ON p.id = fd.person_id
+         WHERE f.root_id = ?1 AND f.deleted_at IS NULL
+           AND f.root_id NOT IN (SELECT id FROM roots WHERE vault_locked = 1)
+         ORDER BY f.id, p.name COLLATE NOCASE, p.id",
+    )?;
+    let rows = stmt.query_map(params![root_id], |r| {
+        Ok((
+            r.get::<_, i64>(0)?,
+            r.get::<_, String>(1)?,
+            r.get::<_, String>(2)?,
+            r.get::<_, Option<String>>(3)?,
+            r.get::<_, i64>(4)?,
+            r.get::<_, String>(5)?,
+            r.get::<_, String>(6)?,
+        ))
+    })?;
+    let mut out: Vec<FileWithPersons> = Vec::new();
+    for row in rows {
+        let (id, rel_path, abs_path, thumb_path, person_id, name, fingerprint) = row?;
+        match out.last_mut() {
+            Some(last) if last.id == id => {
+                if !last.persons.iter().any(|(pid, _)| *pid == person_id) {
+                    last.persons.push((person_id, name));
+                }
+            }
+            _ => out.push(FileWithPersons {
+                id,
+                rel_path,
+                abs_path,
+                thumb_path,
+                fingerprint,
+                persons: vec![(person_id, name)],
+            }),
+        }
+    }
+    Ok(out)
+}
+
+/// Does a live copy of `fingerprint` already exist under `rel_prefix` in this root?
+pub fn has_file_with_fingerprint_under(
+    db_path: &Path,
+    root_id: i64,
+    rel_prefix: &str,
+    fingerprint: &str,
+) -> AppResult<bool> {
+    if fingerprint.is_empty() {
+        return Ok(false);
+    }
+    let conn = open_conn(db_path)?;
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM files
+         WHERE root_id = ?1 AND deleted_at IS NULL AND fingerprint = ?2 AND rel_path LIKE ?3",
+        params![root_id, fingerprint, format!("{}%", rel_prefix.replace('%', "\\%"))],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
+/// Column names of `table` except `id`, in declaration order.
+fn table_columns_without_id(conn: &Connection, table: &str) -> AppResult<Vec<String>> {
+    let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})"))?;
+    let cols = stmt
+        .query_map([], |r| r.get::<_, String>(1))?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(cols.into_iter().filter(|c| c != "id").collect())
+}
+
+/// Duplicate a file row (classification, metadata, face detections) for a
+/// physical copy that now lives at `new_rel_path`. Face crops are not shared:
+/// the clones get `crop_path = NULL` and are regenerated on demand.
+pub fn clone_file_record(
+    db_path: &Path,
+    source_id: i64,
+    new_rel_path: &str,
+    new_abs_path: &str,
+    new_filename: &str,
+    new_thumb_path: Option<&str>,
+) -> AppResult<i64> {
+    let conn = open_conn(db_path)?;
+    let tx = conn.unchecked_transaction()?;
+    let now = now_epoch_secs();
+
+    let cols = table_columns_without_id(&tx, "files")?;
+    let select: Vec<String> = cols
+        .iter()
+        .map(|c| match c.as_str() {
+            "rel_path" => "?2 AS rel_path".to_string(),
+            "abs_path" => "?3 AS abs_path".to_string(),
+            "filename" => "?4 AS filename".to_string(),
+            "thumb_path" => "?5 AS thumb_path".to_string(),
+            "updated_at" => "?6 AS updated_at".to_string(),
+            "deleted_at" => "NULL AS deleted_at".to_string(),
+            other => other.to_string(),
+        })
+        .collect();
+    tx.execute(
+        &format!(
+            "INSERT INTO files ({}) SELECT {} FROM files WHERE id = ?1",
+            cols.join(", "),
+            select.join(", ")
+        ),
+        params![source_id, new_rel_path, new_abs_path, new_filename, new_thumb_path, now],
+    )?;
+    let new_id = tx.last_insert_rowid();
+    refresh_fts(&tx, new_id)?;
+
+    let face_cols = table_columns_without_id(&tx, "face_detections")?;
+    let face_select: Vec<String> = face_cols
+        .iter()
+        .map(|c| match c.as_str() {
+            "file_id" => "?2 AS file_id".to_string(),
+            "crop_path" => "NULL AS crop_path".to_string(),
+            other => other.to_string(),
+        })
+        .collect();
+    tx.execute(
+        &format!(
+            "INSERT INTO face_detections ({}) SELECT {} FROM face_detections WHERE file_id = ?1",
+            face_cols.join(", "),
+            face_select.join(", ")
+        ),
+        params![source_id, new_id],
+    )?;
+    tx.commit()?;
+    Ok(new_id)
+}
+
+#[cfg(test)]
+pub fn create_person_for_test(db_path: &Path, name: &str) -> i64 {
+    let conn = open_conn(db_path).expect("open");
+    conn.execute(
+        "INSERT INTO people (name, created_at) VALUES (?1, ?2)",
+        params![name, now_epoch_secs()],
+    )
+    .expect("insert person");
+    conn.last_insert_rowid()
+}
+
+#[cfg(test)]
+pub fn insert_face_for_test(db_path: &Path, file_id: i64, person_id: Option<i64>) -> i64 {
+    let conn = open_conn(db_path).expect("open");
+    conn.execute(
+        "INSERT INTO face_detections (file_id, person_id, bbox_x, bbox_y, bbox_w, bbox_h, confidence, embedding, created_at)
+         VALUES (?1, ?2, 0.1, 0.1, 0.2, 0.2, 0.9, X'00', ?3)",
+        params![file_id, person_id, now_epoch_secs()],
+    )
+    .expect("insert face");
+    conn.execute(
+        "UPDATE files SET face_count = (SELECT COUNT(*) FROM face_detections WHERE file_id = ?1) WHERE id = ?1",
+        params![file_id],
+    )
+    .expect("face count");
+    conn.last_insert_rowid()
+}
+
+// ---------------------------------------------------------------------------
+// Vault roots
+// ---------------------------------------------------------------------------
+
+const VAULT_ROOT_SELECT: &str =
+    "SELECT id, root_path, root_name, vault_cipher_dir, vault_locked, vault_scrubbed FROM roots";
+
+fn map_vault_root(row: &rusqlite::Row<'_>) -> rusqlite::Result<VaultRoot> {
+    Ok(VaultRoot {
+        id: row.get(0)?,
+        root_path: row.get(1)?,
+        root_name: row.get(2)?,
+        cipher_dir: row.get(3)?,
+        locked: row.get(4)?,
+        scrubbed: row.get(5)?,
+    })
+}
+
+/// Placeholder written over a locked vault's `rel_path` (must stay unique per row).
+const SCRUBBED_REL_PREFIX: &str = "locked://";
+
+/// Collect every DB row that describes a vault's files so it can be sealed
+/// inside the vault while locked (and re-imported if the root is re-attached).
+pub fn snapshot_vault_index(db_path: &Path, root_id: i64) -> AppResult<VaultIndexSnapshot> {
+    let conn = open_conn(db_path)?;
+    let root_path: String = conn.query_row(
+        "SELECT root_path FROM roots WHERE id = ?1",
+        params![root_id],
+        |r| r.get(0),
+    )?;
+    let mut stmt = conn.prepare(
+        "SELECT id, rel_path, filename, abs_path, thumb_path, media_type, description,
+                extracted_text, canonical_mentions, confidence, lang_hint, mtime_ns, size_bytes,
+                fingerprint, scan_marker, location_text, dhash, duration_secs, video_width,
+                video_height, video_codec, audio_codec, face_count, deleted_at
+         FROM files WHERE root_id = ?1 ORDER BY id",
+    )?;
+    let files = stmt
+        .query_map(params![root_id], |r| {
+            Ok(VaultFileSnapshot {
+                id: r.get(0)?,
+                rel_path: r.get(1)?,
+                filename: r.get(2)?,
+                abs_path: r.get(3)?,
+                thumb_path: r.get(4)?,
+                media_type: r.get(5)?,
+                description: r.get(6)?,
+                extracted_text: r.get(7)?,
+                canonical_mentions: r.get(8)?,
+                confidence: r.get::<_, f64>(9)? as f32,
+                lang_hint: r.get(10)?,
+                mtime_ns: r.get(11)?,
+                size_bytes: r.get(12)?,
+                fingerprint: r.get(13)?,
+                scan_marker: r.get(14)?,
+                location_text: r.get::<_, Option<String>>(15)?.unwrap_or_default(),
+                dhash: r.get(16)?,
+                duration_secs: r.get(17)?,
+                video_width: r.get(18)?,
+                video_height: r.get(19)?,
+                video_codec: r.get(20)?,
+                audio_codec: r.get(21)?,
+                face_count: r.get(22)?,
+                deleted_at: r.get(23)?,
+            })
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+
+    let mut stmt = conn.prepare(
+        "SELECT fd.id, fd.crop_path FROM face_detections fd
+         JOIN files f ON f.id = fd.file_id WHERE f.root_id = ?1 ORDER BY fd.id",
+    )?;
+    let faces = stmt
+        .query_map(params![root_id], |r| {
+            Ok(VaultFaceSnapshot {
+                id: r.get(0)?,
+                crop_path: r.get(1)?,
+            })
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+
+    let mut stmt =
+        conn.prepare("SELECT id, cursor_rel_path FROM scan_jobs WHERE root_id = ?1 ORDER BY id")?;
+    let job_cursors = stmt
+        .query_map(params![root_id], |r| {
+            Ok(VaultJobCursor {
+                id: r.get(0)?,
+                cursor_rel_path: r.get(1)?,
+            })
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+
+    Ok(VaultIndexSnapshot {
+        version: 1,
+        root_id,
+        root_path,
+        files,
+        faces,
+        job_cursors,
+    })
+}
+
+/// Blank every name- or content-bearing column of a vault's rows (and their
+/// FTS entries) so nothing about the files is readable from the DB while the
+/// vault is locked. Uses SQLite `secure_delete` so the old bytes are zeroed
+/// rather than left in free pages. Row ids are preserved.
+pub fn scrub_vault_index(db_path: &Path, root_id: i64) -> AppResult<u64> {
+    let conn = open_conn(db_path)?;
+    conn.pragma_update(None, "secure_delete", true)?;
+    let tx = conn.unchecked_transaction()?;
+    tx.execute(
+        "DELETE FROM files_fts WHERE rowid IN (SELECT id FROM files WHERE root_id = ?1)",
+        params![root_id],
+    )?;
+    let n = tx.execute(
+        &format!(
+            "UPDATE files SET rel_path = '{SCRUBBED_REL_PREFIX}' || id, filename = 'locked',
+                    abs_path = '', thumb_path = NULL, description = '', extracted_text = '',
+                    canonical_mentions = '', location_text = '', lang_hint = ''
+             WHERE root_id = ?1"
+        ),
+        params![root_id],
+    )?;
+    tx.execute(
+        "UPDATE face_detections SET crop_path = NULL
+         WHERE file_id IN (SELECT id FROM files WHERE root_id = ?1)",
+        params![root_id],
+    )?;
+    tx.execute(
+        "UPDATE scan_jobs SET cursor_rel_path = NULL WHERE root_id = ?1",
+        params![root_id],
+    )?;
+    tx.execute(
+        "UPDATE roots SET vault_scrubbed = 1 WHERE id = ?1",
+        params![root_id],
+    )?;
+    tx.commit()?;
+    Ok(n as u64)
+}
+
+/// Put the columns blanked by [`scrub_vault_index`] back, matching rows by id.
+pub fn restore_vault_index(
+    db_path: &Path,
+    root_id: i64,
+    snapshot: &VaultIndexSnapshot,
+) -> AppResult<u64> {
+    if snapshot.root_id != root_id {
+        return Err(AppError::Config(format!(
+            "vault snapshot belongs to root {} but root {} was requested",
+            snapshot.root_id, root_id
+        )));
+    }
+    let conn = open_conn(db_path)?;
+    let tx = conn.unchecked_transaction()?;
+    let mut restored = 0u64;
+    for f in &snapshot.files {
+        let changed = tx.execute(
+            "UPDATE files SET rel_path = ?3, filename = ?4, abs_path = ?5, thumb_path = ?6,
+                    description = ?7, extracted_text = ?8, canonical_mentions = ?9,
+                    location_text = ?10, lang_hint = ?11
+             WHERE id = ?1 AND root_id = ?2",
+            params![
+                f.id,
+                root_id,
+                f.rel_path,
+                f.filename,
+                f.abs_path,
+                f.thumb_path,
+                f.description,
+                f.extracted_text,
+                f.canonical_mentions,
+                f.location_text,
+                f.lang_hint
+            ],
+        )?;
+        if changed > 0 {
+            refresh_fts(&tx, f.id)?;
+            restored += 1;
+        }
+    }
+    for face in &snapshot.faces {
+        tx.execute(
+            "UPDATE face_detections SET crop_path = ?2 WHERE id = ?1",
+            params![face.id, face.crop_path],
+        )?;
+    }
+    for job in &snapshot.job_cursors {
+        tx.execute(
+            "UPDATE scan_jobs SET cursor_rel_path = ?2 WHERE id = ?1 AND root_id = ?3",
+            params![job.id, job.cursor_rel_path, root_id],
+        )?;
+    }
+    tx.execute(
+        "UPDATE roots SET vault_scrubbed = 0 WHERE id = ?1",
+        params![root_id],
+    )?;
+    tx.commit()?;
+    Ok(restored)
+}
+
+#[cfg(test)]
+pub fn open_conn_for_test(db_path: &Path) -> Connection {
+    open_conn(db_path).expect("open test connection")
+}
+
+pub fn set_vault_scrubbed(db_path: &Path, root_id: i64, scrubbed: bool) -> AppResult<()> {
+    let conn = open_conn(db_path)?;
+    conn.execute(
+        "UPDATE roots SET vault_scrubbed = ?2 WHERE id = ?1 AND vault_cipher_dir IS NOT NULL",
+        params![root_id, scrubbed],
+    )?;
+    Ok(())
+}
+
+/// Re-create file rows from a snapshot under a (new) root, e.g. when a vault
+/// that was removed from the library is attached again. Paths are rebuilt for
+/// `mount_point` so a vault moved elsewhere still imports cleanly. Faces are
+/// not carried over (their embeddings are not in the snapshot).
+pub fn import_vault_snapshot(
+    db_path: &Path,
+    root_id: i64,
+    mount_point: &Path,
+    thumbnails_dir: &Path,
+    snapshot: &VaultIndexSnapshot,
+) -> AppResult<u64> {
+    let mut imported = 0u64;
+    for f in snapshot.files.iter().filter(|f| f.deleted_at.is_none()) {
+        let record = FileRecordUpsert {
+            root_id,
+            rel_path: f.rel_path.clone(),
+            abs_path: mount_point.join(&f.rel_path).display().to_string(),
+            filename: f.filename.clone(),
+            media_type: f.media_type.clone(),
+            description: f.description.clone(),
+            extracted_text: f.extracted_text.clone(),
+            canonical_mentions: f.canonical_mentions.clone(),
+            confidence: f.confidence,
+            lang_hint: f.lang_hint.clone(),
+            mtime_ns: f.mtime_ns,
+            size_bytes: f.size_bytes,
+            fingerprint: f.fingerprint.clone(),
+            scan_marker: f.scan_marker,
+            location_text: f.location_text.clone(),
+            dhash: f.dhash,
+            duration_secs: f.duration_secs,
+            video_width: f.video_width,
+            video_height: f.video_height,
+            video_codec: f.video_codec.clone(),
+            audio_codec: f.audio_codec.clone(),
+        };
+        let file_id = upsert_file_record(db_path, &record)?;
+        if f.thumb_path.is_some() {
+            let stem = crate::platform::paths::normalize_rel_path(
+                &Path::new(&f.rel_path).with_extension("jpg").to_string_lossy(),
+            );
+            let thumb = thumbnails_dir.join(stem);
+            if thumb.is_file() {
+                update_file_thumb_path_by_id(db_path, file_id, &thumb.display().to_string())?;
+            }
+        }
+        imported += 1;
+    }
+    Ok(imported)
+}
+
+pub fn root_exists_for_path(db_path: &Path, root_path: &str) -> AppResult<bool> {
+    let conn = open_conn(db_path)?;
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM roots WHERE root_path = ?1",
+        params![root_path],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
+/// Create the root row for a freshly converted vault (unlocked).
+pub fn insert_vault_root(db_path: &Path, root_path: &str, cipher_dir: &str) -> AppResult<i64> {
+    let conn = open_conn(db_path)?;
+    let tx = conn.unchecked_transaction()?;
+    let root_id = upsert_root_conn(&tx, root_path)?;
+    tx.execute(
+        "UPDATE roots SET vault_cipher_dir = ?2, vault_locked = 0 WHERE id = ?1",
+        params![root_id, cipher_dir],
+    )?;
+    tx.commit()?;
+    Ok(root_id)
+}
+
+pub fn get_vault_root(db_path: &Path, root_id: i64) -> AppResult<Option<VaultRoot>> {
+    let conn = open_conn(db_path)?;
+    let sql = format!("{VAULT_ROOT_SELECT} WHERE id = ?1 AND vault_cipher_dir IS NOT NULL");
+    match conn.query_row(&sql, params![root_id], map_vault_root) {
+        Ok(v) => Ok(Some(v)),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+        Err(e) => Err(e.into()),
+    }
+}
+
+pub fn find_vault_root_by_path(db_path: &Path, root_path: &str) -> AppResult<Option<VaultRoot>> {
+    let conn = open_conn(db_path)?;
+    let sql = format!("{VAULT_ROOT_SELECT} WHERE root_path = ?1 AND vault_cipher_dir IS NOT NULL");
+    match conn.query_row(&sql, params![root_path], map_vault_root) {
+        Ok(v) => Ok(Some(v)),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+        Err(e) => Err(e.into()),
+    }
+}
+
+pub fn list_vault_roots(db_path: &Path) -> AppResult<Vec<VaultRoot>> {
+    let conn = open_conn(db_path)?;
+    let sql = format!("{VAULT_ROOT_SELECT} WHERE vault_cipher_dir IS NOT NULL ORDER BY id");
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map([], map_vault_root)?;
+    let mut out = Vec::new();
+    for row in rows {
+        out.push(row?);
+    }
+    Ok(out)
+}
+
+pub fn set_vault_locked(db_path: &Path, root_id: i64, locked: bool) -> AppResult<()> {
+    let conn = open_conn(db_path)?;
+    conn.execute(
+        "UPDATE roots SET vault_locked = ?2 WHERE id = ?1 AND vault_cipher_dir IS NOT NULL",
+        params![root_id, locked],
+    )?;
+    Ok(())
+}
+
+pub fn set_all_vaults_locked(db_path: &Path) -> AppResult<()> {
+    let conn = open_conn(db_path)?;
+    conn.execute(
+        "UPDATE roots SET vault_locked = 1 WHERE vault_cipher_dir IS NOT NULL",
+        [],
+    )?;
+    Ok(())
 }
 
 /// When removing a child root that has a parent root, reassign files back to
@@ -1278,6 +1812,10 @@ pub fn validate_and_purge_stale_roots(
     let roots = list_roots(db_path)?;
     let mut purged = Vec::new();
     for root in roots {
+        // A locked vault has no mount point on disk by design.
+        if root.is_vault {
+            continue;
+        }
         if !Path::new(&root.root_path).is_dir() {
             let result = purge_root(db_path, root.id)?;
             // Also try to clean up the thumbnail subtree for this root
@@ -1634,7 +2172,10 @@ fn search_images_normalized(
     let has_query = !fts_query.is_empty();
 
     let mut from_sql = String::from(" FROM files f ");
-    let mut where_clauses = vec!["f.deleted_at IS NULL".to_string()];
+    let mut where_clauses = vec![
+        "f.deleted_at IS NULL".to_string(),
+        VISIBLE_ROOT_FILTER.to_string(),
+    ];
     let mut bind_values: Vec<Value> = Vec::new();
 
     if has_query {
@@ -1778,7 +2319,10 @@ fn search_like_fallback(
     let like_pattern = format!("%{query_lower}%");
 
     let mut from_sql = String::from(" FROM files f ");
-    let mut where_clauses = vec!["f.deleted_at IS NULL".to_string()];
+    let mut where_clauses = vec![
+        "f.deleted_at IS NULL".to_string(),
+        VISIBLE_ROOT_FILTER.to_string(),
+    ];
     let mut bind_values: Vec<Value> = Vec::new();
 
     // LIKE across searchable text columns
@@ -2348,6 +2892,7 @@ pub fn list_protected_pdfs(db_path: &Path) -> AppResult<Vec<ProtectedPdfInfo>> {
          JOIN roots r ON r.id = f.root_id
          WHERE f.description = 'Password-protected PDF (skipped)'
            AND f.deleted_at IS NULL
+           AND f.root_id NOT IN (SELECT id FROM roots WHERE vault_locked = 1)
          ORDER BY f.filename",
     )?;
     let rows = stmt.query_map([], |row| {
@@ -2434,6 +2979,7 @@ pub fn list_files_needing_face_scan(
     let sql = "SELECT f.id, f.rel_path, f.abs_path
          FROM files f
          WHERE f.deleted_at IS NULL
+           AND f.root_id NOT IN (SELECT id FROM roots WHERE vault_locked = 1)
            AND f.face_count = 0
            AND f.root_id = ?1
            AND (
@@ -2487,6 +3033,7 @@ pub fn list_files_with_faces(
                 f.thumb_path, f.face_count
          FROM files f
          WHERE f.deleted_at IS NULL
+           AND f.root_id NOT IN (SELECT id FROM roots WHERE vault_locked = 1)
            AND f.face_count > 0
            {}
          ORDER BY f.face_count DESC, f.rel_path",
@@ -2539,7 +3086,7 @@ pub fn get_face_stats(db_path: &Path, root_scope: &[i64]) -> AppResult<FaceStats
         )
     };
 
-    let base_where = "f.deleted_at IS NULL AND f.confidence > 0 AND f.media_type IN ('photo', 'screenshot', 'meme', 'anime', 'illustration')";
+    let base_where = "f.deleted_at IS NULL AND f.root_id NOT IN (SELECT id FROM roots WHERE vault_locked = 1) AND f.confidence > 0 AND f.media_type IN ('photo', 'screenshot', 'meme', 'anime', 'illustration')";
 
     // images_with_faces: face_count > 0
     let sql = format!(
@@ -2603,18 +3150,18 @@ pub fn list_persons(
 ) -> AppResult<Vec<crate::models::PersonInfo>> {
     let conn = open_conn(db_path)?;
 
-    let (scope_join, scope_clause, scope_params) = if root_scope.is_empty() {
-        ("".to_string(), "".to_string(), vec![])
+    // Always join files so faces from locked vaults never surface.
+    let scope_join = " JOIN files fil ON fil.id = fd.file_id ".to_string();
+    let mut scope_clause = String::from(
+        " AND fil.deleted_at IS NULL \
+          AND fil.root_id NOT IN (SELECT id FROM roots WHERE vault_locked = 1)",
+    );
+    let scope_params: Vec<Value> = if root_scope.is_empty() {
+        vec![]
     } else {
         let placeholders: Vec<String> = root_scope.iter().map(|_| "?".to_string()).collect();
-        (
-            " JOIN files fil ON fil.id = fd.file_id ".to_string(),
-            format!(
-                " AND fil.root_id IN ({}) AND fil.deleted_at IS NULL",
-                placeholders.join(",")
-            ),
-            root_scope.iter().map(|id| Value::from(*id)).collect(),
-        )
+        scope_clause.push_str(&format!(" AND fil.root_id IN ({})", placeholders.join(",")));
+        root_scope.iter().map(|id| Value::from(*id)).collect()
     };
 
     let sql = format!(
@@ -2730,6 +3277,7 @@ pub fn list_faces_for_person(
          FROM face_detections fd
          JOIN files f ON f.id = fd.file_id
          WHERE fd.person_id = ?1
+           AND f.root_id NOT IN (SELECT id FROM roots WHERE vault_locked = 1)
          ORDER BY fd.confidence DESC",
     )?;
     let faces = stmt
@@ -3340,7 +3888,8 @@ pub fn faces_missing_crops(db_path: &Path) -> AppResult<Vec<crate::models::FaceC
          FROM face_detections fd
          JOIN files f ON f.id = fd.file_id
          JOIN roots r ON r.id = f.root_id
-         WHERE fd.crop_path IS NULL AND f.deleted_at IS NULL",
+         WHERE fd.crop_path IS NULL AND f.deleted_at IS NULL
+           AND f.root_id NOT IN (SELECT id FROM roots WHERE vault_locked = 1)",
     )?;
     let jobs = stmt
         .query_map([], |row| {
@@ -3383,7 +3932,9 @@ pub fn list_subdirectories(
     // We extract the next path segment after the prefix to group by directory.
     let mut stmt = conn.prepare(
         "SELECT rel_path FROM files
-         WHERE root_id = ? AND deleted_at IS NULL AND rel_path LIKE ?",
+         WHERE root_id = ? AND deleted_at IS NULL
+           AND root_id NOT IN (SELECT id FROM roots WHERE vault_locked = 1)
+           AND rel_path LIKE ?",
     )?;
 
     let rows = stmt.query_map(params![root_id, like_pattern], |row| {
@@ -3468,9 +4019,11 @@ fn find_exact_duplicates(db_path: &Path, root_scope: &[i64]) -> AppResult<Vec<Du
          FROM files f \
          JOIN roots r ON f.root_id = r.id \
          WHERE f.deleted_at IS NULL \
+           AND f.root_id NOT IN (SELECT id FROM roots WHERE vault_locked = 1) \
            AND f.fingerprint IN ( \
                SELECT fingerprint FROM files \
-               WHERE deleted_at IS NULL ",
+               WHERE deleted_at IS NULL \
+               AND root_id NOT IN (SELECT id FROM roots WHERE vault_locked = 1) ",
     );
 
     let mut bind_values: Vec<Value> = Vec::new();
@@ -3606,7 +4159,8 @@ fn find_near_duplicates(
          f.thumb_path, f.fingerprint, f.dhash \
          FROM files f \
          JOIN roots r ON f.root_id = r.id \
-         WHERE f.deleted_at IS NULL AND f.dhash IS NOT NULL ",
+         WHERE f.deleted_at IS NULL AND f.dhash IS NOT NULL \
+           AND f.root_id NOT IN (SELECT id FROM roots WHERE vault_locked = 1) ",
     );
 
     let mut bind_values: Vec<Value> = Vec::new();
@@ -4561,11 +5115,11 @@ mod tests {
         init_database(&db_path).expect("init");
 
         let conn = open_conn(&db_path).expect("open");
-        // Verify user_version is set (13 migrations applied → version 13)
+        // Verify user_version is set (15 migrations applied → version 15)
         let version: i64 = conn
             .pragma_query_value(None, "user_version", |r| r.get(0))
             .expect("user_version");
-        assert_eq!(version, 13);
+        assert_eq!(version, 15);
 
         // Verify all tables exist
         let tables: Vec<String> = {
@@ -4609,8 +5163,8 @@ mod tests {
         let version: i64 = conn
             .pragma_query_value(None, "user_version", |r| r.get(0))
             .expect("user_version");
-        // We have 13 migrations (indices 0..12), so user_version should be 13
-        assert_eq!(version, 13);
+        // We have 15 migrations (indices 0..14), so user_version should be 15
+        assert_eq!(version, 15);
     }
 
     #[test]
@@ -6851,5 +7405,213 @@ mod tests {
             |r| r.get(0),
         )
         .expect("file id")
+    }
+    // -----------------------------------------------------------------------
+    // Vault roots
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn vault_roots_flags_and_lookup() {
+        let (_dir, db_path) = test_db_path();
+        init_database(&db_path).expect("init");
+        let normal = upsert_root(&db_path, "/tmp/normal").expect("root");
+        let vault_id =
+            insert_vault_root(&db_path, "/tmp/secret", "/tmp/.secret.vault").expect("vault");
+
+        assert!(root_exists_for_path(&db_path, "/tmp/secret").unwrap());
+        assert!(!root_exists_for_path(&db_path, "/tmp/other").unwrap());
+
+        let roots = list_roots(&db_path).unwrap();
+        let n = roots.iter().find(|r| r.id == normal).unwrap();
+        assert!(!n.is_vault && !n.vault_locked);
+        let v = roots.iter().find(|r| r.id == vault_id).unwrap();
+        assert!(v.is_vault && !v.vault_locked);
+
+        assert!(get_vault_root(&db_path, normal).unwrap().is_none());
+        let vr = get_vault_root(&db_path, vault_id).unwrap().unwrap();
+        assert_eq!(vr.cipher_dir, "/tmp/.secret.vault");
+        assert_eq!(vr.root_name, "secret");
+        assert!(find_vault_root_by_path(&db_path, "/tmp/secret").unwrap().is_some());
+        assert!(find_vault_root_by_path(&db_path, "/tmp/normal").unwrap().is_none());
+        assert_eq!(list_vault_roots(&db_path).unwrap().len(), 1);
+
+        set_vault_locked(&db_path, vault_id, true).unwrap();
+        assert!(get_vault_root(&db_path, vault_id).unwrap().unwrap().locked);
+        // Locking a normal root is a no-op.
+        set_vault_locked(&db_path, normal, true).unwrap();
+        let n = list_roots(&db_path).unwrap().into_iter().find(|r| r.id == normal).unwrap();
+        assert!(!n.vault_locked);
+
+        set_vault_locked(&db_path, vault_id, false).unwrap();
+        assert!(!get_vault_root(&db_path, vault_id).unwrap().unwrap().locked);
+        set_all_vaults_locked(&db_path).unwrap();
+        assert!(get_vault_root(&db_path, vault_id).unwrap().unwrap().locked);
+    }
+
+    #[test]
+    fn locked_vault_files_are_hidden_from_listings() {
+        let (_dir, db_path) = test_db_path();
+        init_database(&db_path).expect("init");
+        let normal = upsert_root(&db_path, "/tmp/normal").expect("root");
+        let vault_id =
+            insert_vault_root(&db_path, "/tmp/secret", "/tmp/.secret.vault").expect("vault");
+        upsert_file_record(&db_path, &sample_record(normal, "a.jpg", "fp-a")).unwrap();
+        upsert_file_record(&db_path, &sample_record(vault_id, "b.jpg", "fp-b")).unwrap();
+        upsert_file_record(&db_path, &sample_record(vault_id, "sub/c.jpg", "fp-a")).unwrap();
+
+        let all = SearchRequest::default();
+        let text = SearchRequest {
+            query: "desc".to_string(),
+            ..Default::default()
+        };
+
+        // Unlocked: everything is visible.
+        assert_eq!(search_images(&db_path, &all).unwrap().total, 3);
+        assert_eq!(search_images(&db_path, &text).unwrap().total, 3);
+        assert_eq!(list_subdirectories(&db_path, vault_id, "").unwrap().len(), 1);
+        let dups = find_duplicates(&db_path, &[], None).unwrap();
+        assert_eq!(dups.groups.len(), 1, "a.jpg and sub/c.jpg share a fingerprint");
+
+        // Locked: the vault's files disappear from every listing.
+        set_vault_locked(&db_path, vault_id, true).unwrap();
+        let visible = search_images(&db_path, &all).unwrap();
+        assert_eq!(visible.total, 1);
+        assert!(visible.items.iter().all(|i| i.root_id == normal));
+        assert_eq!(search_images(&db_path, &text).unwrap().total, 1);
+        assert!(list_subdirectories(&db_path, vault_id, "").unwrap().is_empty());
+        assert!(find_duplicates(&db_path, &[], None).unwrap().groups.is_empty());
+        // Root list still reports the vault (with its count) so it can be unlocked.
+        let v = list_roots(&db_path).unwrap().into_iter().find(|r| r.id == vault_id).unwrap();
+        assert!(v.vault_locked);
+        assert_eq!(v.file_count, 2);
+
+        // Unlock restores visibility.
+        set_vault_locked(&db_path, vault_id, false).unwrap();
+        assert_eq!(search_images(&db_path, &all).unwrap().total, 3);
+    }
+
+    #[test]
+    fn stale_root_purge_skips_vaults() {
+        let (dir, db_path) = test_db_path();
+        init_database(&db_path).expect("init");
+        let missing_normal = dir.path().join("gone");
+        let missing_vault = dir.path().join("secret");
+        upsert_root(&db_path, &missing_normal.display().to_string()).unwrap();
+        insert_vault_root(
+            &db_path,
+            &missing_vault.display().to_string(),
+            &dir.path().join(".secret.vault").display().to_string(),
+        )
+        .unwrap();
+
+        let purged = validate_and_purge_stale_roots(&db_path, &dir.path().join("thumbs")).unwrap();
+        assert_eq!(purged.len(), 1);
+        assert!(purged[0].ends_with("gone"));
+        let roots = list_roots(&db_path).unwrap();
+        assert_eq!(roots.len(), 1);
+        assert!(roots[0].is_vault);
+    }
+    #[test]
+    fn vault_index_snapshot_scrub_restore_round_trip() {
+        let (dir, db_path) = test_db_path();
+        init_database(&db_path).expect("init");
+        let vault_id =
+            insert_vault_root(&db_path, "/tmp/secret", "/tmp/.secret.vault").expect("vault");
+        let a = upsert_file_record(&db_path, &sample_record(vault_id, "a.jpg", "fp-a")).unwrap();
+        let b = upsert_file_record(&db_path, &sample_record(vault_id, "sub/b.jpg", "fp-b")).unwrap();
+        update_file_thumb_path_by_id(&db_path, a, "/tmp/secret/.frank_sherlock/thumbnails/a.jpg")
+            .unwrap();
+        let _ = dir;
+
+        let snap = snapshot_vault_index(&db_path, vault_id).unwrap();
+        assert_eq!(snap.root_id, vault_id);
+        assert_eq!(snap.root_path, "/tmp/secret");
+        assert_eq!(snap.files.len(), 2);
+        let fa = snap.files.iter().find(|f| f.id == a).unwrap();
+        assert_eq!(fa.description, "desc of a.jpg");
+        assert_eq!(fa.thumb_path.as_deref(), Some("/tmp/secret/.frank_sherlock/thumbnails/a.jpg"));
+        assert_eq!(fa.fingerprint, "fp-a");
+        // JSON round trip must be lossless.
+        let json = serde_json::to_string(&snap).unwrap();
+        let back: VaultIndexSnapshot = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, snap);
+
+        // Scrub: nothing readable remains, FTS is empty, ids preserved.
+        assert_eq!(scrub_vault_index(&db_path, vault_id).unwrap(), 2);
+        let conn = open_conn(&db_path).unwrap();
+        let (rel, name, abs, desc, thumb): (String, String, String, String, Option<String>) = conn
+            .query_row(
+                "SELECT rel_path, filename, abs_path, description, thumb_path FROM files WHERE id = ?1",
+                params![b],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+            )
+            .unwrap();
+        assert_eq!(rel, format!("locked://{b}"));
+        assert_eq!(name, "locked");
+        assert!(abs.is_empty() && desc.is_empty() && thumb.is_none());
+        let fts: i64 = conn
+            .query_row("SELECT COUNT(*) FROM files_fts", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(fts, 0);
+        assert!(get_vault_root(&db_path, vault_id).unwrap().unwrap().scrubbed);
+        let text = SearchRequest {
+            query: "desc".to_string(),
+            ..Default::default()
+        };
+        assert_eq!(search_images(&db_path, &text).unwrap().total, 0);
+        drop(conn);
+
+        // Restore brings everything back, including FTS.
+        assert_eq!(restore_vault_index(&db_path, vault_id, &snap).unwrap(), 2);
+        assert!(!get_vault_root(&db_path, vault_id).unwrap().unwrap().scrubbed);
+        assert_eq!(search_images(&db_path, &text).unwrap().total, 2);
+        let after = snapshot_vault_index(&db_path, vault_id).unwrap();
+        assert_eq!(after, snap);
+
+        // A snapshot for another root is refused.
+        let other = insert_vault_root(&db_path, "/tmp/other", "/tmp/.other.vault").unwrap();
+        assert!(restore_vault_index(&db_path, other, &snap).is_err());
+    }
+
+    #[test]
+    fn import_vault_snapshot_recreates_rows_under_new_root() {
+        let (dir, db_path) = test_db_path();
+        init_database(&db_path).expect("init");
+        let old = insert_vault_root(&db_path, "/old/secret", "/old/.secret.vault").unwrap();
+        upsert_file_record(&db_path, &sample_record(old, "a.jpg", "fp-a")).unwrap();
+        let mut gone = sample_record(old, "gone.jpg", "fp-g");
+        gone.description = "should not be imported".into();
+        upsert_file_record(&db_path, &gone).unwrap();
+        let mut snap = snapshot_vault_index(&db_path, old).unwrap();
+        snap.files.iter_mut().for_each(|f| {
+            if f.rel_path == "gone.jpg" {
+                f.deleted_at = Some(1);
+            }
+            if f.rel_path == "a.jpg" {
+                f.thumb_path = Some("/old/secret/.frank_sherlock/thumbnails/a.jpg".into());
+            }
+        });
+        purge_root(&db_path, old).unwrap();
+
+        let mount = dir.path().join("secret");
+        let thumbs = mount.join(".frank_sherlock").join("thumbnails");
+        std::fs::create_dir_all(&thumbs).unwrap();
+        std::fs::write(thumbs.join("a.jpg"), b"jpg").unwrap();
+        let new_root = insert_vault_root(
+            &db_path,
+            &mount.display().to_string(),
+            &dir.path().join(".secret.vault").display().to_string(),
+        )
+        .unwrap();
+        let n = import_vault_snapshot(&db_path, new_root, &mount, &thumbs, &snap).unwrap();
+        assert_eq!(n, 1);
+        let all = search_images(&db_path, &SearchRequest::default()).unwrap();
+        assert_eq!(all.total, 1);
+        let item = &all.items[0];
+        assert_eq!(item.root_id, new_root);
+        assert_eq!(item.rel_path, "a.jpg");
+        assert_eq!(item.abs_path, mount.join("a.jpg").display().to_string());
+        assert_eq!(item.thumbnail_path.as_deref(), Some(thumbs.join("a.jpg").display().to_string().as_str()));
+        assert_eq!(item.description, "desc of a.jpg");
     }
 }

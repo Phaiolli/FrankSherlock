@@ -355,6 +355,122 @@ pub struct RootInfo {
     pub created_at: i64,
     pub last_scan_at: Option<i64>,
     pub file_count: u64,
+    /// True when this root is an encrypted vault (gocryptfs).
+    pub is_vault: bool,
+    /// True when the vault is locked (unmounted and hidden). Always false for normal roots.
+    pub vault_locked: bool,
+}
+
+/// Internal view of a vault root (never serialized to the frontend).
+#[derive(Debug, Clone)]
+pub struct VaultRoot {
+    pub id: i64,
+    pub root_path: String,
+    pub root_name: String,
+    pub cipher_dir: String,
+    pub locked: bool,
+    /// True while the vault's index rows are blanked in the DB (sealed inside the vault).
+    pub scrubbed: bool,
+}
+
+/// Everything the DB knows about a vault's files, sealed inside the vault
+/// (`<root>/.frank_sherlock/index.json`) while it is locked.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct VaultIndexSnapshot {
+    pub version: u32,
+    pub root_id: i64,
+    pub root_path: String,
+    pub files: Vec<VaultFileSnapshot>,
+    pub faces: Vec<VaultFaceSnapshot>,
+    pub job_cursors: Vec<VaultJobCursor>,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct VaultFileSnapshot {
+    pub id: i64,
+    pub rel_path: String,
+    pub filename: String,
+    pub abs_path: String,
+    pub thumb_path: Option<String>,
+    pub media_type: String,
+    pub description: String,
+    pub extracted_text: String,
+    pub canonical_mentions: String,
+    pub confidence: f32,
+    pub lang_hint: String,
+    pub mtime_ns: i64,
+    pub size_bytes: i64,
+    pub fingerprint: String,
+    pub scan_marker: i64,
+    pub location_text: String,
+    pub dhash: Option<i64>,
+    pub duration_secs: Option<f64>,
+    pub video_width: Option<u32>,
+    pub video_height: Option<u32>,
+    pub video_codec: Option<String>,
+    pub audio_codec: Option<String>,
+    pub face_count: i64,
+    pub deleted_at: Option<i64>,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct VaultFaceSnapshot {
+    pub id: i64,
+    pub crop_path: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct VaultJobCursor {
+    pub id: i64,
+    pub cursor_rel_path: Option<String>,
+}
+
+/// Outcome of organizing a root on disk (see `organize.rs`).
+#[derive(Debug, Clone, Default, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OrganizeResult {
+    pub moved: u64,
+    pub copied: u64,
+    pub skipped: u64,
+    pub people: u64,
+    pub errors: Vec<String>,
+}
+
+/// A file plus the (person id, person name) pairs recognised in it.
+#[derive(Debug, Clone)]
+pub struct FileWithPersons {
+    pub id: i64,
+    pub rel_path: String,
+    pub abs_path: String,
+    pub thumb_path: Option<String>,
+    pub fingerprint: String,
+    pub persons: Vec<(i64, String)>,
+}
+
+/// What "Add folder" learns about a path before deciding between
+/// "create a new vault" and "reopen an existing one".
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VaultProbe {
+    /// An encrypted store exists for this path; offer "reopen" instead of "create".
+    pub attachable: bool,
+    pub mount_point: Option<String>,
+    pub cipher_dir: Option<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VaultSupport {
+    pub supported: bool,
+    pub reason: Option<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CreateVaultResult {
+    pub root_id: i64,
+    pub root_path: String,
+    pub migrated_files: u64,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]

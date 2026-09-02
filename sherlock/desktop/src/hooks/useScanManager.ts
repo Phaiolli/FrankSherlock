@@ -176,8 +176,17 @@ export function useScanManager(cb: ScanManagerCallbacks) {
     try {
       const selected = await open({ directory: true, multiple: false, title: "Select folder to scan" });
       if (!selected) return;
+      await onScanPath(selected as string);
+    } catch (err) {
+      cb.setError(errorMessage(err));
+    }
+  }
+
+  /** Start a full scan for an already-chosen folder path. Errors surface as toasts. */
+  async function onScanPath(rootPath: string) {
+    try {
       setCompletedJobs([]);
-      const job = await startScan(selected as string);
+      const job = await startScan(rootPath);
       setTrackedJobIds((prev) => [...prev, job.id]);
       lastProcessedRef.current = 0;
       cb.setNotice(`Scan started for ${basename(job.rootPath)}`);
@@ -301,6 +310,7 @@ export function useScanManager(cb: ScanManagerCallbacks) {
     pollRuntimeAndScans,
     initApp,
     onPickAndScan,
+    onScanPath,
     onRescanRoot,
     onRefreshRoot,
     onCancelScan,

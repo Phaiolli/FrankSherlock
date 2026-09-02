@@ -3,6 +3,7 @@ pub mod gpu;
 pub mod paths;
 pub mod process;
 pub mod python;
+pub mod vault_fs;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "lowercase")]

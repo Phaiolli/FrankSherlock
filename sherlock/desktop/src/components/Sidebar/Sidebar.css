@@ -447,3 +447,26 @@
   color: var(--text-secondary);
   font-style: italic;
 }
+
+/* ── Secret folders (vaults) ─────────────────────────────── */
+.root-card-vault-badge {
+  padding: 0 5px;
+  border-radius: var(--radius-sm);
+  background: var(--bg-input);
+  color: var(--text-secondary);
+  font-size: 0.65rem;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
+.root-card-vault-badge.locked {
+  color: var(--warning, #d9a400);
+}
+
+.root-card-locked .root-card-name {
+  color: var(--text-secondary);
+}
+
+.root-card-vault-btn {
+  margin-top: 2px;
+}

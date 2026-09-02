@@ -1,0 +1,73 @@
+/* ── Add folder / Unlock vault modals ─────────────────────── */
+.vault-modal {
+  width: min(460px, 90%);
+}
+
+.vault-modal input[type="password"],
+.vault-modal input[type="text"] {
+  width: 100%;
+  padding: 6px 8px;
+  border: 1px solid var(--border-primary);
+  border-radius: var(--radius-sm);
+  background: var(--bg-input);
+  color: var(--text-primary);
+  font: inherit;
+  font-size: var(--font-size-sm);
+  box-sizing: border-box;
+  margin-bottom: 8px;
+}
+
+.vault-modal input:focus {
+  outline: none;
+  border-color: var(--border-focus);
+}
+
+.vault-path {
+  font-size: var(--font-size-sm);
+  color: var(--text-secondary);
+  margin: 0 0 10px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.vault-checkbox {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  font-size: var(--font-size-sm);
+  color: var(--text-primary);
+  margin: 0 0 10px;
+  cursor: pointer;
+}
+
+.vault-checkbox input {
+  margin: 2px 0 0;
+  flex-shrink: 0;
+}
+
+.vault-hint {
+  font-size: 0.75rem;
+  color: var(--text-secondary);
+  margin: -4px 0 10px 24px;
+}
+
+.vault-warning {
+  font-size: 0.75rem;
+  line-height: 1.4;
+  color: var(--text-secondary);
+  background: var(--bg-input);
+  border-left: 3px solid var(--warning, #d9a400);
+  padding: 6px 8px;
+  margin: 0 0 10px;
+}
+
+.vault-warning code {
+  color: var(--text-primary);
+}
+
+.vault-error {
+  color: var(--danger);
+  font-size: 0.75rem;
+  margin: -4px 0 8px;
+}

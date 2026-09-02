@@ -1,6 +1,10 @@
 import { invoke } from "@tauri-apps/api/core";
 import type {
   Album,
+  CreateVaultResult,
+  OrganizeResult,
+  VaultProbe,
+  VaultSupport,
   ClusterResult,
   DbStats,
   DeleteFilesResult,
@@ -83,6 +87,34 @@ export async function removeRoot(rootId: number): Promise<PurgeResult> {
 
 export async function listRoots(): Promise<RootInfo[]> {
   return invoke<RootInfo[]>("list_roots");
+}
+
+export async function getVaultSupport(): Promise<VaultSupport> {
+  return invoke<VaultSupport>("get_vault_support");
+}
+
+export async function organizeRootByPeople(rootId: number): Promise<OrganizeResult> {
+  return invoke<OrganizeResult>("organize_root_by_people", { rootId });
+}
+
+export async function probeVault(folderPath: string): Promise<VaultProbe> {
+  return invoke<VaultProbe>("probe_vault", { folderPath });
+}
+
+export async function attachVault(folderPath: string, password: string): Promise<CreateVaultResult> {
+  return invoke<CreateVaultResult>("attach_vault", { folderPath, password });
+}
+
+export async function createVault(folderPath: string, password: string): Promise<CreateVaultResult> {
+  return invoke<CreateVaultResult>("create_vault", { folderPath, password });
+}
+
+export async function unlockVault(rootId: number, password: string): Promise<void> {
+  return invoke<void>("unlock_vault", { rootId, password });
+}
+
+export async function lockVault(rootId: number): Promise<void> {
+  return invoke<void>("lock_vault", { rootId });
 }
 
 export async function listSubdirectories(rootId: number, parentPrefix: string): Promise<SubdirEntry[]> {

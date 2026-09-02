@@ -40,6 +40,9 @@ import PropertiesModal from "./components/modals/PropertiesModal";
 import ModelInfoModal from "./components/modals/ModelInfoModal";
 import CreateAlbumModal from "./components/modals/CreateAlbumModal";
 import CreateSmartFolderModal from "./components/modals/CreateSmartFolderModal";
+import AddFolderModal from "./components/modals/AddFolderModal";
+import UnlockVaultModal from "./components/modals/UnlockVaultModal";
+import OrganizeModal from "./components/modals/OrganizeModal";
 import { useToast } from "./hooks/useToast";
 import { useUserConfig } from "./hooks/useUserConfig";
 import { useGridColumns } from "./hooks/useGridColumns";
@@ -48,6 +51,8 @@ import { usePolling } from "./hooks/usePolling";
 import { useSelection } from "./hooks/useSelection";
 import { useSearch } from "./hooks/useSearch";
 import { useScanManager } from "./hooks/useScanManager";
+import { useVaultManager } from "./hooks/useVaultManager";
+import { useOrganizeManager } from "./hooks/useOrganizeManager";
 import { useGridNavigation } from "./hooks/useGridNavigation";
 import { useAppInit } from "./hooks/useAppInit";
 import { useAutoUpdate } from "./hooks/useAutoUpdate";
@@ -169,6 +174,31 @@ export default function App() {
     setError,
     runSearch,
     itemsLength: () => items.length,
+  });
+
+  /* ── Organize a folder on disk by recognised people ── */
+  const organizeManager = useOrganizeManager({
+    onNotice: setNotice,
+    onError: setError,
+    onChanged: async () => {
+      await scanManager.refreshRoots();
+      await runSearch(0, false);
+      const stats = await ensureDatabase();
+      setDbStats(stats);
+    },
+  });
+
+  /* ── Secret folders: add-folder flow + lock/unlock ── */
+  const vaultManager = useVaultManager({
+    onNotice: setNotice,
+    onError: setError,
+    scanPath: scanManager.onScanPath,
+    refreshRoots: scanManager.refreshRoots,
+    onVisibilityChanged: async () => {
+      await runSearch(0, false);
+      const stats = await ensureDatabase();
+      setDbStats(stats);
+    },
   });
 
   /* ── Init app: also load albums + smart folders + CLI folder ── */
@@ -603,6 +633,34 @@ export default function App() {
       {showModelInfo && runtime && (
         <ModelInfoModal runtime={runtime} setup={setup} onClose={() => setShowModelInfo(false)} />
       )}
+      {vaultManager.pendingFolder && (
+        <AddFolderModal
+          folderPath={vaultManager.pendingFolder}
+          vaultSupport={vaultManager.support}
+          probe={vaultManager.probe}
+          busy={vaultManager.busy}
+          onCancel={vaultManager.cancelAddFolder}
+          onAddPlain={() => void vaultManager.onAddPlainFolder()}
+          onCreateVault={vaultManager.onCreateVault}
+          onAttachVault={vaultManager.onAttachVault}
+        />
+      )}
+      {organizeManager.organizeTarget && (
+        <OrganizeModal
+          root={organizeManager.organizeTarget}
+          busy={organizeManager.busy}
+          onCancel={organizeManager.cancel}
+          onConfirm={() => void organizeManager.onConfirm()}
+        />
+      )}
+      {vaultManager.unlockTarget && (
+        <UnlockVaultModal
+          root={vaultManager.unlockTarget}
+          busy={vaultManager.busy}
+          onCancel={vaultManager.cancelUnlock}
+          onUnlock={vaultManager.onUnlock}
+        />
+      )}
       {confirmDeleteRoot && (
         <ConfirmDeleteModal
           root={confirmDeleteRoot}
@@ -727,7 +785,10 @@ export default function App() {
             copyFilesToClipboard([root.rootPath]).catch(() => {});
             setNotice(`Copied path: ${root.rootPath}`);
           }}
-          onPickAndScan={() => scanManager.onPickAndScan(setup, readOnly)}
+          onPickAndScan={() => vaultManager.onPickFolder(setup, readOnly)}
+          onUnlockVault={(root) => vaultManager.setUnlockTarget(root)}
+          onLockVault={(root) => vaultManager.onLock(root)}
+          onOrganizeRoot={(root) => organizeManager.setOrganizeTarget(root)}
           onCancelScan={(scan) => scanManager.onCancelScan(scan, readOnly)}
           onResumeScan={(scan) => scanManager.onResumeScan(scan, readOnly)}
           onSelectAlbum={handleSelectAlbum}

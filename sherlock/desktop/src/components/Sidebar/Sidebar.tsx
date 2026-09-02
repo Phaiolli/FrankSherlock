@@ -31,6 +31,9 @@ type SidebarProps = {
   onCancelFaceDetect: () => void;
   onCancelScan: (scan: ScanJobStatus) => void;
   onResumeScan: (scan: ScanJobStatus) => void;
+  onUnlockVault?: (root: RootInfo) => void;
+  onLockVault?: (root: RootInfo) => void;
+  onOrganizeRoot?: (root: RootInfo) => void;
   onSelectAlbum: (album: Album) => void;
   onDeleteAlbum: (album: Album) => void;
   onSelectSmartFolder: (folder: SmartFolder) => void;
@@ -55,7 +58,7 @@ export default function Sidebar({
   selectedSubdir, faceProgress, onSelectSubdir,
   onSelectRoot, onDeleteRoot, onRescanRoot, onRefreshRoot, onCopyRootPath, onPickAndScan,
   onDetectFaces, onCancelFaceDetect,
-  onCancelScan, onResumeScan,
+  onCancelScan, onResumeScan, onUnlockVault, onLockVault, onOrganizeRoot,
   onSelectAlbum, onDeleteAlbum, onSelectSmartFolder, onDeleteSmartFolder,
   onReorderRoots, onReorderAlbums, onReorderSmartFolders, onFindDuplicates,
   onOpenPdfPasswords, onOpenFaces,
@@ -111,8 +114,11 @@ export default function Sidebar({
                   onCancelScan={scan?.status === "running" ? () => onCancelScan(scan) : undefined}
                   onResumeScan={scan?.status === "interrupted" ? () => onResumeScan(scan) : undefined}
                   onCancelFaceDetect={faceProgress?.rootId === root.id ? onCancelFaceDetect : undefined}
+                  onUnlockVault={onUnlockVault ? () => onUnlockVault(root) : undefined}
+                  onLockVault={onLockVault ? () => onLockVault(root) : undefined}
+                  onOrganize={onOrganizeRoot && !readOnly ? () => onOrganizeRoot(root) : undefined}
                 />
-                {selectedRootId === root.id && (
+                {selectedRootId === root.id && !(root.isVault && root.vaultLocked) && (
                   <DirectoryTree
                     rootId={root.id}
                     selectedSubdir={selectedSubdir}

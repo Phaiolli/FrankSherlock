@@ -14,6 +14,8 @@ pub enum AppError {
     Config(String),
     #[error("task join error: {0}")]
     Join(String),
+    #[error("{0}")]
+    Vault(String),
 }
 
 pub type AppResult<T> = Result<T, AppError>;

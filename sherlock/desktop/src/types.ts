@@ -146,6 +146,36 @@ export type RootInfo = {
   createdAt: number;
   lastScanAt: number | null;
   fileCount: number;
+  /** Encrypted (gocryptfs) secret folder. */
+  isVault: boolean;
+  /** Vault is locked: unmounted and hidden from every listing. */
+  vaultLocked: boolean;
+};
+
+export type VaultSupport = {
+  supported: boolean;
+  reason: string | null;
+};
+
+export type OrganizeResult = {
+  moved: number;
+  copied: number;
+  skipped: number;
+  people: number;
+  errors: string[];
+};
+
+export type VaultProbe = {
+  /** An encrypted store already exists for this path: offer "reopen". */
+  attachable: boolean;
+  mountPoint: string | null;
+  cipherDir: string | null;
+};
+
+export type CreateVaultResult = {
+  rootId: number;
+  rootPath: string;
+  migratedFiles: number;
 };
 
 export type DeleteFilesResult = {

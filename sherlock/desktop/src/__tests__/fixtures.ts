@@ -33,6 +33,19 @@ export const mockRoot: RootInfo = {
   createdAt: 0,
   lastScanAt: null,
   fileCount: 42,
+  isVault: false,
+  vaultLocked: false,
+};
+
+export const mockVaultRoot: RootInfo = {
+  id: 7,
+  rootPath: "/home/user/secret",
+  rootName: "secret",
+  createdAt: 0,
+  lastScanAt: null,
+  fileCount: 5,
+  isVault: true,
+  vaultLocked: true,
 };
 
 export const mockRunningScan: ScanJobStatus = {

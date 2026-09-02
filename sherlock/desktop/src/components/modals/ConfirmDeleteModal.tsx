@@ -23,7 +23,14 @@ export default function ConfirmDeleteModal({ root, isScanning, onCancel, onConfi
         {isScanning && (
           <p className="confirm-scan-warning">A scan is running for this folder and will be cancelled.</p>
         )}
-        <p className="confirm-note">Original files on disk will not be touched.</p>
+        {root.isVault ? (
+          <p className="confirm-note">
+            The secret folder will be locked first. Its encrypted store (<code>.{root.rootName}.vault</code>)
+            stays on disk and can be reopened later with its password.
+          </p>
+        ) : (
+          <p className="confirm-note">Original files on disk will not be touched.</p>
+        )}
         <div className="modal-actions">
           <button type="button" onClick={onCancel}>Cancel</button>
           <button type="button" className="danger-btn" onClick={() => onConfirm(root)}>

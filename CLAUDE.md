@@ -39,9 +39,9 @@ From `sherlock/desktop/`:
 ```bash
 npm install                    # frontend deps
 cargo build                    # rust backend (from src-tauri/)
-cargo test                     # 322 unit tests
+cargo test                     # 360 unit tests
 npm run tauri:dev              # launch dev mode
-npm run test                   # 299 frontend tests
+npm run test                   # 335 frontend tests (App.test.tsx needs Node 22+ for pdfjs)
 npm run tauri:build            # produce AppImage/DMG/MSI
 ```
 
@@ -62,8 +62,10 @@ WEBKIT_DISABLE_DMABUF_RENDERER=1 GDK_BACKEND=wayland,x11 npm run tauri:dev
 | `config.rs` | AppPaths resolution, directory creation |
 | `lib.rs` | Tauri commands, scan worker spawning, setup/download flow, auto-cleanup, scan cancellation |
 | `query_parser.rs` | Natural language query parsing (media type, dates, confidence) |
+| `vault.rs` | Secret folders: gocryptfs-encrypted roots. Converts a folder into `<parent>/.<name>.vault`, mounts it at the original path while unlocked, locks (unmounts + hides) at startup/exit. Thumbnails, face crops and the sealed DB index (`index.json`) of a vault live inside the mount (`<root>/.frank_sherlock/`); while locked the vault's `files` rows are blanked with `secure_delete`. Removed vaults can be reopened via "Add folder" (probe/attach) |
+| `organize.rs` | "Organize by People": moves files with recognised faces into `<root>/Pessoas/<Name>/` (copies when several people), updating DB rows, thumbnails and cloned face rows in place; prunes emptied folders |
 | `runtime.rs` | Ollama/nvidia-smi status gathering |
-| `platform/` | OS abstraction: clipboard, GPU detection, Python venv paths, executable lookup |
+| `platform/` | OS abstraction: clipboard, GPU detection, Python venv paths, executable lookup, gocryptfs mount/unmount (`vault_fs.rs`, Linux/macOS; Windows reports unsupported) |
 
 ## Architecture Principles
 
@@ -96,10 +98,10 @@ WEBKIT_DISABLE_DMABUF_RENDERER=1 GDK_BACKEND=wayland,x11 npm run tauri:dev
 
 ```bash
 # Rust (from sherlock/desktop/src-tauri/)
-cargo test                     # 322 tests
+cargo test                     # 360 tests
 
 # Frontend (from sherlock/desktop/)
-npm run test                   # 299 tests
+npm run test                   # 335 tests
 ```
 
 Tests cover: JSON parsing fallbacks, thumbnail generation, incremental scan discovery, DB operations (upsert, touch, delete, FTS), query parsing, scan job persistence, platform abstraction, and all UI components. Shared test fixtures live in `src/__tests__/fixtures.ts`.
@@ -128,5 +130,7 @@ Schema is managed by `rusqlite_migration` in `db.rs`. Migrations are tracked via
 
 - Never modify files in scanned target directories.
 - Never remove the FTS5 virtual table without migration logic.
+- Every user-facing file listing in `db.rs` must include `VISIBLE_ROOT_FILTER` (hides locked vaults) next to `deleted_at IS NULL`.
+- Only `vault.rs` (one-time encryption of a secret folder) and `organize.rs` (explicit "Organize by People") may move, copy or delete files inside a scanned folder. Both are user-triggered, update the DB in the same pass, and never touch files the user did not ask about.
 - Keep `csp: null` in `tauri.conf.json` — needed for `convertFileSrc` asset protocol.
 - The Surya OCR script must stay compatible with being run from an isolated venv (no system Python imports).
