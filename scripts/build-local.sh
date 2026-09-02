@@ -18,7 +18,9 @@ cargo test
 
 echo "==> Building Tauri app (release)"
 cd "$DESKTOP_DIR"
-npm run tauri:build
+# NO_STRIP: linuxdeploy ships an old `strip` that rejects modern glibc
+# libraries (".relr.dyn" sections) on Fedora/Arch, aborting the bundle.
+NO_STRIP=true npm run tauri:build
 
 echo ""
 echo "==> Build complete!"
