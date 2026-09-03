@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import { renderHook, act, waitFor } from "@testing-library/react";
 import { open } from "@tauri-apps/plugin-dialog";
 import { useVaultManager } from "../../hooks/useVaultManager";
-import { attachVault, createVault, getVaultSupport, listVolumes, lockVault, probeVault, resolveFolderPath, unlockVault } from "../../api";
+import { attachVault, createVault, getVaultProgress, getVaultSupport, listVolumes, lockVault, probeVault, resolveFolderPath, unlockVault } from "../../api";
 import { mockVaultRoot } from "../fixtures";
 
 vi.mock("../../api", async (importOriginal) => {
@@ -10,6 +10,7 @@ vi.mock("../../api", async (importOriginal) => {
   return {
     ...actual,
     getVaultSupport: vi.fn(),
+    getVaultProgress: vi.fn(),
     listVolumes: vi.fn(),
     resolveFolderPath: vi.fn(),
     probeVault: vi.fn(),
@@ -47,6 +48,7 @@ describe("useVaultManager", () => {
     vi.mocked(createVault).mockResolvedValue({ rootId: 7, rootPath: "/home/user/secret", migratedFiles: 3 });
     vi.mocked(probeVault).mockResolvedValue({ attachable: false, mountPoint: null, cipherDir: null });
     vi.mocked(attachVault).mockResolvedValue({ rootId: 8, rootPath: "/home/user/secret", migratedFiles: 12 });
+    vi.mocked(getVaultProgress).mockResolvedValue(null);
     vi.mocked(unlockVault).mockResolvedValue(undefined);
     vi.mocked(lockVault).mockResolvedValue(undefined);
     vi.mocked(open).mockResolvedValue("/home/user/secret");
@@ -170,6 +172,33 @@ describe("useVaultManager", () => {
     expect(callbacks.scanPath).toHaveBeenCalledWith("/home/user/secret");
     expect(callbacks.onNotice).toHaveBeenCalledWith(expect.stringContaining("3 files encrypted"));
     expect(result.current.pendingFolder).toBeNull();
+  });
+
+  it("polls conversion progress while encrypting and clears it when done", async () => {
+    vi.useFakeTimers();
+    try {
+      const progress = { phase: "encrypting" as const, processedFiles: 2, totalFiles: 9, processedBytes: 20, totalBytes: 90 };
+      vi.mocked(getVaultProgress).mockResolvedValue(progress);
+      let finish: (r: { rootId: number; rootPath: string; migratedFiles: number }) => void = () => {};
+      vi.mocked(createVault).mockReturnValue(new Promise((resolve) => { finish = resolve; }));
+
+      const { result } = renderHook(() => useVaultManager(callbacks));
+      await pickAndBrowse(result);
+      let pending: Promise<string | null> = Promise.resolve(null);
+      act(() => { pending = result.current.onCreateVault("hunter2"); });
+
+      await act(async () => { await vi.advanceTimersByTimeAsync(600); });
+      expect(getVaultProgress).toHaveBeenCalled();
+      expect(result.current.vaultProgress).toEqual(progress);
+
+      await act(async () => {
+        finish({ rootId: 7, rootPath: "/home/user/secret", migratedFiles: 9 });
+        await pending;
+      });
+      expect(result.current.vaultProgress).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("returns backend errors from createVault and keeps the modal open", async () => {

@@ -1,7 +1,7 @@
 import { describe, it, expect, vi } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { cleanup, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import AddFolderModal, { validateVaultPassword } from "../../components/modals/AddFolderModal";
+import AddFolderModal, { validateVaultPassword, vaultProgressPercent } from "../../components/modals/AddFolderModal";
 
 const supported = { supported: true, reason: null };
 
@@ -114,5 +114,38 @@ describe("AddFolderModal", () => {
     const props = renderModal();
     await userEvent.click(screen.getByRole("button", { name: "Cancel" }));
     expect(props.onCancel).toHaveBeenCalled();
+  });
+});
+
+describe("vaultProgressPercent", () => {
+  it("prefers bytes, falls back to files and is null when nothing is known", () => {
+    expect(vaultProgressPercent({ phase: "encrypting", processedFiles: 1, totalFiles: 4, processedBytes: 50, totalBytes: 200 })).toBe(25);
+    expect(vaultProgressPercent({ phase: "encrypting", processedFiles: 1, totalFiles: 4, processedBytes: 0, totalBytes: 0 })).toBe(25);
+    expect(vaultProgressPercent({ phase: "preparing", processedFiles: 0, totalFiles: 0, processedBytes: 0, totalBytes: 0 })).toBeNull();
+  });
+});
+
+describe("AddFolderModal progress", () => {
+  it("shows the phase, counts and sizes while encrypting", () => {
+    renderModal({
+      busy: true,
+      progress: { phase: "encrypting", processedFiles: 3, totalFiles: 10, processedBytes: 2048, totalBytes: 8192 },
+    });
+    expect(screen.getByRole("status")).toHaveTextContent("Encrypting files...");
+    expect(screen.getByRole("status")).toHaveTextContent("3 / 10 files");
+    expect(screen.getByRole("status")).toHaveTextContent("2.0 KB of 8.0 KB");
+  });
+
+  it("names the other phases", () => {
+    renderModal({ busy: true, progress: { phase: "verifying", processedFiles: 10, totalFiles: 10, processedBytes: 8192, totalBytes: 8192 } });
+    expect(screen.getByRole("status")).toHaveTextContent("Verifying the copy...");
+  });
+
+  it("hides the bar when not busy or with no progress yet", () => {
+    renderModal({ busy: false, progress: { phase: "encrypting", processedFiles: 1, totalFiles: 2, processedBytes: 1, totalBytes: 2 } });
+    expect(screen.queryByRole("status")).not.toBeInTheDocument();
+    cleanup();
+    renderModal({ busy: true, progress: null });
+    expect(screen.queryByRole("status")).not.toBeInTheDocument();
   });
 });

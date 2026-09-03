@@ -71,3 +71,45 @@
   font-size: 0.75rem;
   margin: -4px 0 8px;
 }
+
+/* ── Secret-folder conversion progress ────────────────────── */
+.vault-progress {
+  margin: 0 0 10px;
+}
+
+.vault-progress-bar {
+  height: 6px;
+  border-radius: 3px;
+  background: var(--bg-input);
+  border: 1px solid var(--border-primary);
+  overflow: hidden;
+}
+
+.vault-progress-fill {
+  height: 100%;
+  background: var(--accent, #4a9eff);
+  transition: width 0.3s ease;
+}
+
+.vault-progress-fill.indeterminate {
+  width: 35%;
+  animation: vault-progress-slide 1.4s ease-in-out infinite;
+}
+
+@keyframes vault-progress-slide {
+  0% { margin-left: -35%; }
+  100% { margin-left: 100%; }
+}
+
+.vault-progress-label {
+  font-size: 0.75rem;
+  color: var(--text-secondary);
+  margin: 6px 0 0;
+}
+
+.vault-progress-hint {
+  font-size: 0.7rem;
+  color: var(--text-secondary);
+  opacity: 0.8;
+  margin: 2px 0 0;
+}

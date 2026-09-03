@@ -179,6 +179,15 @@ export type VolumeInfo = {
   kind: "home" | "root" | "drive";
 };
 
+/** Live progress while a folder is being converted into a secret folder. */
+export type VaultProgress = {
+  phase: "preparing" | "encrypting" | "verifying" | "finishing";
+  processedFiles: number;
+  totalFiles: number;
+  processedBytes: number;
+  totalBytes: number;
+};
+
 export type CreateVaultResult = {
   rootId: number;
   rootPath: string;

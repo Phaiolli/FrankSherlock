@@ -58,6 +58,8 @@ struct AppState {
     face_detect_progress: Arc<Mutex<Option<models::FaceDetectProgress>>>,
     face_detect_cancel: Arc<AtomicBool>,
     recluster_progress: Arc<Mutex<Option<models::ReclusterProgress>>>,
+    /// Live progress of the secret-folder conversion, polled by the modal.
+    vault_progress: Arc<Mutex<Option<models::VaultProgress>>>,
 }
 
 impl AppState {
@@ -1649,10 +1651,30 @@ async fn create_vault(
 ) -> Result<CreateVaultResult, String> {
     require_writable(state.inner())?;
     let db_path = state.paths.db_file.clone();
-    tauri::async_runtime::spawn_blocking(move || vault::create_vault(&db_path, &folder_path, &password))
-        .await
+    let progress = state.vault_progress.clone();
+    let cleanup = progress.clone();
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        vault::create_vault(&db_path, &folder_path, &password, &|p| {
+            *progress.lock().expect("vault progress mutex poisoned") = Some(p);
+        })
+    })
+    .await;
+    // The modal closes on success and shows the error otherwise; either way the
+    // progress must not linger for the next conversion.
+    *cleanup.lock().expect("vault progress mutex poisoned") = None;
+    result
         .map_err(|e| AppError::Join(e.to_string()).to_string())?
         .map_err(|e| e.to_string())
+}
+
+/// Progress of the running `create_vault`, or `None` when nothing is running.
+#[tauri::command]
+fn get_vault_progress(state: State<'_, AppState>) -> Option<models::VaultProgress> {
+    state
+        .vault_progress
+        .lock()
+        .expect("vault progress mutex poisoned")
+        .clone()
 }
 
 #[tauri::command]
@@ -1913,6 +1935,7 @@ pub fn run() {
         face_detect_progress: Arc::new(Mutex::new(None)),
         face_detect_cancel: Arc::new(AtomicBool::new(false)),
         recluster_progress: Arc::new(Mutex::new(None)),
+        vault_progress: Arc::new(Mutex::new(None)),
     };
 
     tauri::Builder::default()
@@ -1973,6 +1996,7 @@ pub fn run() {
             list_smart_folders,
             reorder_roots,
             get_vault_support,
+            get_vault_progress,
             list_volumes,
             resolve_folder_path,
             organize_root_by_people,

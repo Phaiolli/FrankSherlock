@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
-import { attachVault, createVault, getVaultSupport, listVolumes, lockVault, probeVault, resolveFolderPath, unlockVault } from "../api";
-import type { RootInfo, SetupStatus, VaultProbe, VaultSupport, VolumeInfo } from "../types";
+import { attachVault, createVault, getVaultProgress, getVaultSupport, listVolumes, lockVault, probeVault, resolveFolderPath, unlockVault } from "../api";
+import type { RootInfo, SetupStatus, VaultProbe, VaultProgress, VaultSupport, VolumeInfo } from "../types";
 import { errorMessage } from "../utils";
 
 type VaultManagerCallbacks = {
@@ -31,6 +31,8 @@ export function useVaultManager(cb: VaultManagerCallbacks) {
   const [volumesLoading, setVolumesLoading] = useState(false);
   /** Inline error for a hand-typed path in the chooser. */
   const [pathError, setPathError] = useState<string | null>(null);
+  /** Progress of the running conversion, polled while it encrypts. */
+  const [vaultProgress, setVaultProgress] = useState<VaultProgress | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -117,6 +119,10 @@ export function useVaultManager(cb: VaultManagerCallbacks) {
     const path = pendingFolder;
     if (!path) return "No folder selected";
     setBusy(true);
+    // Encrypting a big folder takes minutes; poll so the modal can show a bar.
+    const poll = setInterval(() => {
+      getVaultProgress().then(setVaultProgress).catch(() => {});
+    }, 500);
     try {
       const result = await createVault(path, password);
       setPendingFolder(null);
@@ -130,6 +136,8 @@ export function useVaultManager(cb: VaultManagerCallbacks) {
     } catch (err) {
       return errorMessage(err);
     } finally {
+      clearInterval(poll);
+      setVaultProgress(null);
       setBusy(false);
     }
   }, [pendingFolder, cb]);
@@ -213,6 +221,7 @@ export function useVaultManager(cb: VaultManagerCallbacks) {
     cancelAddFolder,
     onAddPlainFolder,
     onCreateVault,
+    vaultProgress,
     onAttachVault,
     cancelUnlock,
     onUnlock,

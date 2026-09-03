@@ -1,7 +1,8 @@
 import { useEffect, useRef, useState } from "react";
 import ModalOverlay from "./ModalOverlay";
-import type { VaultProbe, VaultSupport } from "../../types";
+import type { VaultProbe, VaultProgress, VaultSupport } from "../../types";
 import { basename } from "../../utils";
+import { formatBytes } from "../../utils/format";
 import "./shared-modal.css";
 import "./VaultModal.css";
 
@@ -11,6 +12,8 @@ type Props = {
   /** Null while probing; `attachable` switches the modal to "reopen" mode. */
   probe?: VaultProbe | null;
   busy: boolean;
+  /** Live conversion progress; null when idle or not yet reported. */
+  progress?: VaultProgress | null;
   onCancel: () => void;
   onAddPlain: () => void;
   /** Resolves to an error message to display, or null when done. */
@@ -21,13 +24,27 @@ type Props = {
 
 const MIN_PASSWORD_LEN = 4;
 
+const PHASE_LABEL: Record<VaultProgress["phase"], string> = {
+  preparing: "Measuring the folder...",
+  encrypting: "Encrypting files...",
+  verifying: "Verifying the copy...",
+  finishing: "Removing the unencrypted originals...",
+};
+
+/** Percentage done, by bytes when known (big files move the bar smoothly). */
+export function vaultProgressPercent(p: VaultProgress): number | null {
+  if (p.totalBytes > 0) return Math.min(100, (p.processedBytes / p.totalBytes) * 100);
+  if (p.totalFiles > 0) return Math.min(100, (p.processedFiles / p.totalFiles) * 100);
+  return null;
+}
+
 export function validateVaultPassword(password: string, confirm: string): string | null {
   if (password.length < MIN_PASSWORD_LEN) return `Password must be at least ${MIN_PASSWORD_LEN} characters`;
   if (password !== confirm) return "Passwords do not match";
   return null;
 }
 
-export default function AddFolderModal({ folderPath, vaultSupport, probe, busy, onCancel, onAddPlain, onCreateVault, onAttachVault }: Props) {
+export default function AddFolderModal({ folderPath, vaultSupport, probe, busy, progress, onCancel, onAddPlain, onCreateVault, onAttachVault }: Props) {
   const [secret, setSecret] = useState(false);
   const [password, setPassword] = useState("");
   const [confirm, setConfirm] = useState("");
@@ -167,6 +184,27 @@ export default function AddFolderModal({ folderPath, vaultSupport, probe, busy, 
         )}
 
         {error && <p className="vault-error" role="alert">{error}</p>}
+
+        {busy && progress && (
+          <div className="vault-progress" role="status" aria-live="polite">
+            <div className="vault-progress-bar">
+              <div
+                className={`vault-progress-fill${vaultProgressPercent(progress) === null ? " indeterminate" : ""}`}
+                style={vaultProgressPercent(progress) !== null
+                  ? { width: `${vaultProgressPercent(progress)}%` }
+                  : undefined}
+              />
+            </div>
+            <p className="vault-progress-label">
+              {PHASE_LABEL[progress.phase]}
+              {progress.phase === "encrypting" && progress.totalFiles > 0 && (
+                <> {progress.processedFiles} / {progress.totalFiles} files
+                  {" — "}{formatBytes(progress.processedBytes)} of {formatBytes(progress.totalBytes)}</>
+              )}
+            </p>
+            <p className="vault-progress-hint">Do not close the app while this runs.</p>
+          </div>
+        )}
 
         <div className="modal-actions">
           <button type="button" onClick={onCancel} disabled={busy}>Cancel</button>

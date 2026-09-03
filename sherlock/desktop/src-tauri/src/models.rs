@@ -593,6 +593,21 @@ pub struct FaceDetectProgress {
     pub phase: String,
 }
 
+/// Live progress of a secret-folder conversion, polled while `create_vault`
+/// copies the originals into the encrypted store.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VaultProgress {
+    /// `"preparing"` while sizing the folder, `"encrypting"` while copying,
+    /// `"verifying"` while comparing the trees, `"finishing"` while the
+    /// plaintext originals are removed.
+    pub phase: String,
+    pub processed_files: u64,
+    pub total_files: u64,
+    pub processed_bytes: u64,
+    pub total_bytes: u64,
+}
+
 #[derive(Debug, Clone, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PersonInfo {

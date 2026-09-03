@@ -4,6 +4,7 @@ import type {
   CreateVaultResult,
   OrganizeResult,
   VaultProbe,
+  VaultProgress,
   VaultSupport,
   VolumeInfo,
   ClusterResult,
@@ -106,6 +107,11 @@ export async function listVolumes(): Promise<VolumeInfo[]> {
 /** Validate a hand-typed folder path; resolves to its canonical form. */
 export async function resolveFolderPath(path: string): Promise<string> {
   return invoke<string>("resolve_folder_path", { path });
+}
+
+/** Progress of the running secret-folder conversion, or null when idle. */
+export async function getVaultProgress(): Promise<VaultProgress | null> {
+  return invoke<VaultProgress | null>("get_vault_progress");
 }
 
 export async function probeVault(folderPath: string): Promise<VaultProbe> {

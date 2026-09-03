@@ -26,7 +26,9 @@ use walkdir::WalkDir;
 use crate::config::canonical_root_path;
 use crate::db;
 use crate::error::{AppError, AppResult};
-use crate::models::{CreateVaultResult, VaultIndexSnapshot, VaultProbe, VaultRoot, VaultSupport};
+use crate::models::{
+    CreateVaultResult, VaultIndexSnapshot, VaultProbe, VaultProgress, VaultRoot, VaultSupport,
+};
 use crate::platform::vault_fs::{self, VaultFsError};
 
 /// Hidden directory inside an unlocked vault that holds the app's caches.
@@ -184,7 +186,15 @@ impl Migration {
 /// Existing files are copied into the encrypted store and the plaintext
 /// originals are deleted only after the copy is verified. Any failure before
 /// that point restores the folder exactly as it was.
-pub fn create_vault(db_path: &Path, folder_path: &str, password: &str) -> AppResult<CreateVaultResult> {
+/// `report` is called as the conversion advances: encrypting a large folder
+/// takes minutes, and without it the modal looks frozen. Pass `&|_| {}` when
+/// progress is not needed.
+pub fn create_vault(
+    db_path: &Path,
+    folder_path: &str,
+    password: &str,
+    report: &dyn Fn(VaultProgress),
+) -> AppResult<CreateVaultResult> {
     validate_password(password)?;
     vault_fs::gocryptfs_binary().map_err(vault_err)?;
 
@@ -217,6 +227,19 @@ pub fn create_vault(db_path: &Path, folder_path: &str, password: &str) -> AppRes
     }
 
     let has_content = dir_has_entries(&folder)?;
+    // Sizing walks metadata only, but on a big tree it is still worth showing.
+    report(VaultProgress {
+        phase: "preparing".to_string(),
+        processed_files: 0,
+        total_files: 0,
+        processed_bytes: 0,
+        total_bytes: 0,
+    });
+    let (total_files, total_bytes) = if has_content {
+        tree_summary(&folder)?
+    } else {
+        (0, 0)
+    };
     let mut migration = Migration {
         folder: folder.clone(),
         staging: None,
@@ -254,13 +277,31 @@ pub fn create_vault(db_path: &Path, folder_path: &str, password: &str) -> AppRes
     // 4. Copy originals in and verify before deleting anything.
     let mut migrated_files = 0u64;
     if has_content {
-        match copy_dir_recursive(&staging, &folder) {
+        let mut copied_bytes = 0u64;
+        let on_file = |files: u64, bytes: u64| {
+            copied_bytes = bytes;
+            report(VaultProgress {
+                phase: "encrypting".to_string(),
+                processed_files: files,
+                total_files,
+                processed_bytes: bytes,
+                total_bytes,
+            });
+        };
+        match copy_dir_recursive(&staging, &folder, on_file) {
             Ok(n) => migrated_files = n,
             Err(e) => {
                 migration.rollback();
                 return Err(AppError::Vault(format!("copying files into the vault failed: {e}")));
             }
         }
+        report(VaultProgress {
+            phase: "verifying".to_string(),
+            processed_files: migrated_files,
+            total_files,
+            processed_bytes: copied_bytes,
+            total_bytes,
+        });
         let (src_files, src_bytes) = tree_summary(&staging)?;
         let (dst_files, dst_bytes) = tree_summary(&folder)?;
         if src_files != dst_files || src_bytes != dst_bytes {
@@ -283,6 +324,13 @@ pub fn create_vault(db_path: &Path, folder_path: &str, password: &str) -> AppRes
     // 6. Remove the plaintext originals. The vault is already complete and
     //    registered, so a failure here is reported but not rolled back.
     if has_content {
+        report(VaultProgress {
+            phase: "finishing".to_string(),
+            processed_files: migrated_files,
+            total_files,
+            processed_bytes: total_bytes,
+            total_bytes,
+        });
         if let Err(e) = std::fs::remove_dir_all(&staging) {
             return Err(AppError::Vault(format!(
                 "Vault created, but the unencrypted copy at {} could not be removed: {e}. Delete it manually.",
@@ -575,8 +623,15 @@ fn dir_has_entries(dir: &Path) -> AppResult<bool> {
 
 /// Recursively copy `src` into `dst` (which must exist), preserving mtimes.
 /// Returns the number of regular files copied.
-fn copy_dir_recursive(src: &Path, dst: &Path) -> AppResult<u64> {
+/// `on_file(files_copied, bytes_copied)` is called after every regular file so
+/// the caller can report progress.
+fn copy_dir_recursive(
+    src: &Path,
+    dst: &Path,
+    mut on_file: impl FnMut(u64, u64),
+) -> AppResult<u64> {
     let mut count = 0u64;
+    let mut bytes = 0u64;
     for entry in WalkDir::new(src).follow_links(false) {
         let entry = entry.map_err(|e| AppError::Io(std::io::Error::other(e.to_string())))?;
         let rel = entry
@@ -594,13 +649,14 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> AppResult<u64> {
             if let Some(parent) = target.parent() {
                 std::fs::create_dir_all(parent)?;
             }
-            std::fs::copy(entry.path(), &target)?;
+            bytes += std::fs::copy(entry.path(), &target)?;
             if let Some(modified) = entry.metadata().ok().and_then(|m| m.modified().ok()) {
                 if let Ok(f) = std::fs::File::options().write(true).open(&target) {
                     let _ = f.set_modified(modified);
                 }
             }
             count += 1;
+            on_file(count, bytes);
         } else {
             // Symlinks are not carried into the vault: they would point outside it.
             log::warn!("vault migration: skipping non-regular file {}", entry.path().display());
@@ -674,13 +730,32 @@ mod tests {
         std::fs::create_dir_all(src.join("empty")).unwrap();
         std::fs::create_dir_all(&dst).unwrap();
 
-        let n = copy_dir_recursive(&src, &dst).unwrap();
+        let n = copy_dir_recursive(&src, &dst, |_, _| {}).unwrap();
         assert_eq!(n, 2);
         assert_eq!(std::fs::read(dst.join("a.jpg")).unwrap(), b"aaa");
         assert_eq!(std::fs::read(dst.join("sub/deep/b.png")).unwrap(), b"bbbbb");
         assert!(dst.join("empty").is_dir());
         assert_eq!(tree_summary(&src).unwrap(), tree_summary(&dst).unwrap());
         assert_eq!(tree_summary(&dst).unwrap(), (2, 8));
+    }
+
+    #[test]
+    fn copy_dir_recursive_reports_running_file_and_byte_counts() {
+        let tmp = tempfile::tempdir().unwrap();
+        let src = tmp.path().join("src");
+        let dst = tmp.path().join("dst");
+        write(&src.join("a.jpg"), b"aaa");
+        write(&src.join("sub/b.png"), b"bbbbb");
+        std::fs::create_dir_all(&dst).unwrap();
+
+        let mut seen: Vec<(u64, u64)> = Vec::new();
+        let n = copy_dir_recursive(&src, &dst, |files, bytes| seen.push((files, bytes))).unwrap();
+        assert_eq!(n, 2);
+        assert_eq!(seen.len(), 2);
+        assert_eq!(seen[0].0, 1);
+        assert_eq!(seen[1], (2, 8));
+        // Counts only ever grow.
+        assert!(seen.windows(2).all(|w| w[0].0 < w[1].0 && w[0].1 < w[1].1));
     }
 
     #[test]
@@ -699,7 +774,7 @@ mod tests {
         let folder = tmp.path().join("Secret");
         write(&folder.join("a.jpg"), b"aaa");
 
-        let err = create_vault(&db_path, &folder.display().to_string(), "ab").unwrap_err();
+        let err = create_vault(&db_path, &folder.display().to_string(), "ab", &|_| {}).unwrap_err();
         assert!(err.to_string().contains("at least"));
         assert!(folder.join("a.jpg").exists());
         assert!(!cipher_dir_for(&folder).unwrap().exists());
@@ -721,7 +796,10 @@ mod tests {
         write(&folder.join("sub/b.png"), b"bbbbb");
         let folder_str = folder.display().to_string();
 
-        let created = match create_vault(&db_path, &folder_str, "s3cret!") {
+        let seen = std::sync::Mutex::new(Vec::new());
+        let created = match create_vault(&db_path, &folder_str, "s3cret!", &|p| {
+            seen.lock().unwrap().push(p);
+        }) {
             Ok(c) => c,
             Err(e) if e.to_string().contains("fuse") || e.to_string().contains("FUSE") => {
                 eprintln!("FUSE unavailable; skipping round-trip test: {e}");
@@ -730,6 +808,16 @@ mod tests {
             Err(e) => panic!("create_vault failed: {e}"),
         };
         assert_eq!(created.migrated_files, 2);
+        let seen = seen.into_inner().unwrap();
+        let phases: Vec<&str> = seen.iter().map(|p| p.phase.as_str()).collect();
+        assert_eq!(phases.first(), Some(&"preparing"));
+        assert!(phases.contains(&"encrypting"));
+        assert!(phases.contains(&"verifying"));
+        assert_eq!(phases.last(), Some(&"finishing"));
+        let last_copy = seen.iter().rfind(|p| p.phase == "encrypting").unwrap();
+        assert_eq!(last_copy.processed_files, 2);
+        assert_eq!(last_copy.total_files, 2);
+        assert_eq!(last_copy.processed_bytes, last_copy.total_bytes);
         let cipher = cipher_dir_for(&folder).unwrap();
         assert!(cipher.join("gocryptfs.conf").exists());
         assert!(!staging_dir_for(&folder).unwrap().exists());
@@ -781,7 +869,7 @@ mod tests {
         let folder = tmp.path().join("Secret");
         std::fs::create_dir_all(&folder).unwrap();
         let folder_str = folder.display().to_string();
-        let created = match create_vault(&db_path, &folder_str, "s3cret!") {
+        let created = match create_vault(&db_path, &folder_str, "s3cret!", &|_| {}) {
             Ok(c) => c,
             Err(e) if e.to_string().to_lowercase().contains("fuse") => {
                 eprintln!("FUSE unavailable; skipping: {e}");

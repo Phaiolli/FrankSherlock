@@ -650,6 +650,7 @@ export default function App() {
           vaultSupport={vaultManager.support}
           probe={vaultManager.probe}
           busy={vaultManager.busy}
+          progress={vaultManager.vaultProgress}
           onCancel={vaultManager.cancelAddFolder}
           onAddPlain={() => void vaultManager.onAddPlainFolder()}
           onCreateVault={vaultManager.onCreateVault}

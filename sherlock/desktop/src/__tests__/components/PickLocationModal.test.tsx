@@ -80,7 +80,7 @@ describe("PickLocationModal", () => {
     const props = setup();
     await user.click(screen.getByText("Cancel"));
     expect(props.onCancel).toHaveBeenCalledOnce();
-    props.onCancel.mockClear();
+    vi.mocked(props.onCancel).mockClear();
     await user.type(screen.getByLabelText("Folder path"), "{Escape}");
     expect(props.onCancel).toHaveBeenCalled();
   });
