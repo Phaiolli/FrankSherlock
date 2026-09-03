@@ -172,6 +172,13 @@ export type VaultProbe = {
   cipherDir: string | null;
 };
 
+/** A disk / mount point offered as a starting place in the Add Folder picker. */
+export type VolumeInfo = {
+  name: string;
+  path: string;
+  kind: "home" | "root" | "drive";
+};
+
 export type CreateVaultResult = {
   rootId: number;
   rootPath: string;

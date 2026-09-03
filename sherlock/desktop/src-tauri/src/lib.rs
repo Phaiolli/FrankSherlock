@@ -1628,6 +1628,19 @@ fn get_vault_support() -> VaultSupport {
     vault::support()
 }
 
+/// Mounted disks to offer as starting points in the Add Folder picker.
+/// Native dialogs rarely list secondary drives, so we surface them ourselves.
+#[tauri::command]
+fn list_volumes() -> Vec<platform::volumes::VolumeInfo> {
+    platform::volumes::list_volumes()
+}
+
+/// Validate a hand-typed folder path (expands `~`, canonicalizes).
+#[tauri::command]
+fn resolve_folder_path(path: String) -> Result<String, String> {
+    platform::volumes::resolve_folder_path(&path)
+}
+
 #[tauri::command]
 async fn create_vault(
     folder_path: String,
@@ -1960,6 +1973,8 @@ pub fn run() {
             list_smart_folders,
             reorder_roots,
             get_vault_support,
+            list_volumes,
+            resolve_folder_path,
             organize_root_by_people,
             probe_vault,
             create_vault,

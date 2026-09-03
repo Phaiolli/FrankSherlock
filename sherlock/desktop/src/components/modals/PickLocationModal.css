@@ -1,0 +1,121 @@
+/* ── Add folder: choose a disk or type a path ─────────────── */
+.pick-location-modal {
+  width: min(460px, 90%);
+}
+
+.pick-location-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  max-height: 220px;
+  overflow-y: auto;
+  margin-bottom: 12px;
+}
+
+.pick-location-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 6px 8px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  background: var(--bg-input);
+  color: var(--text-primary);
+  font: inherit;
+  font-size: var(--font-size-sm);
+  text-align: left;
+  cursor: pointer;
+}
+
+.pick-location-item:hover {
+  border-color: var(--border-focus);
+}
+
+.pick-location-glyph {
+  flex-shrink: 0;
+  width: 16px;
+  text-align: center;
+  color: var(--text-secondary);
+}
+
+.pick-location-labels {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.pick-location-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pick-location-path {
+  font-size: 0.75rem;
+  color: var(--text-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pick-location-empty {
+  font-size: var(--font-size-sm);
+  color: var(--text-secondary);
+}
+
+.pick-location-manual {
+  display: block;
+  font-size: 0.75rem;
+  color: var(--text-secondary);
+  margin-bottom: 4px;
+}
+
+.pick-location-row {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.pick-location-row input {
+  flex: 1;
+  min-width: 0;
+  padding: 6px 8px;
+  border: 1px solid var(--border-primary);
+  border-radius: var(--radius-sm);
+  background: var(--bg-input);
+  color: var(--text-primary);
+  font: inherit;
+  font-size: var(--font-size-sm);
+}
+
+.pick-location-row input:focus {
+  outline: none;
+  border-color: var(--border-focus);
+}
+
+.pick-location-row button {
+  border: 1px solid var(--border-primary);
+  border-radius: var(--radius-sm);
+  background: var(--bg-input);
+  color: var(--text-primary);
+  padding: 6px 12px;
+  font: inherit;
+  font-size: var(--font-size-sm);
+  cursor: pointer;
+}
+
+.pick-location-row button:hover:not(:disabled) {
+  border-color: var(--border-focus);
+}
+
+.pick-location-row button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.pick-location-error {
+  color: var(--danger);
+  font-size: 0.75rem;
+  margin: -4px 0 8px;
+}

@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
-import { attachVault, createVault, getVaultSupport, lockVault, probeVault, unlockVault } from "../api";
-import type { RootInfo, SetupStatus, VaultProbe, VaultSupport } from "../types";
+import { attachVault, createVault, getVaultSupport, listVolumes, lockVault, probeVault, resolveFolderPath, unlockVault } from "../api";
+import type { RootInfo, SetupStatus, VaultProbe, VaultSupport, VolumeInfo } from "../types";
 import { errorMessage } from "../utils";
 
 type VaultManagerCallbacks = {
@@ -25,6 +25,12 @@ export function useVaultManager(cb: VaultManagerCallbacks) {
   const [probe, setProbe] = useState<VaultProbe | null>(null);
   const [unlockTarget, setUnlockTarget] = useState<RootInfo | null>(null);
   const [busy, setBusy] = useState(false);
+  /** True while the "where to browse" chooser is open. */
+  const [picking, setPicking] = useState(false);
+  const [volumes, setVolumes] = useState<VolumeInfo[]>([]);
+  const [volumesLoading, setVolumesLoading] = useState(false);
+  /** Inline error for a hand-typed path in the chooser. */
+  const [pathError, setPathError] = useState<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -34,26 +40,65 @@ export function useVaultManager(cb: VaultManagerCallbacks) {
     return () => { cancelled = true; };
   }, []);
 
-  /** Open the native picker; the chosen path goes to the Add Folder modal. */
+  /** Hand a chosen path to the Add Folder modal, probing it for a vault. */
+  const acceptFolder = useCallback(async (path: string) => {
+    setPicking(false);
+    setPathError(null);
+    setProbe(null);
+    setPendingFolder(path);
+    // Detect a previously created vault (".name.vault" next to, or as, the pick).
+    const result = await probeVault(path).catch(() => null);
+    setProbe(result);
+  }, []);
+
+  /**
+   * Open the location chooser. System dialogs rarely list secondary disks, so
+   * the user first picks a volume (or types a path) and only then browses.
+   */
   const onPickFolder = useCallback(async (setup: SetupStatus | null, readOnly: boolean) => {
     if (readOnly) return;
     if (setup && !setup.isReady) {
       cb.onError("Setup is incomplete. Finish Ollama setup before adding folders.");
       return;
     }
+    setPathError(null);
+    setPicking(true);
+    setVolumesLoading(true);
     try {
-      const selected = await open({ directory: true, multiple: false, title: "Select folder to add" });
-      if (!selected) return;
-      const path = selected as string;
-      setProbe(null);
-      setPendingFolder(path);
-      // Detect a previously created vault (".name.vault" next to, or as, the pick).
-      const result = await probeVault(path).catch(() => null);
-      setProbe(result);
+      setVolumes(await listVolumes());
+    } catch {
+      setVolumes([]); // Browsing and typing a path still work without the list.
+    } finally {
+      setVolumesLoading(false);
+    }
+  }, [cb]);
+
+  /** Open the native picker, starting inside `startPath` when given. */
+  const browseFrom = useCallback(async (startPath?: string) => {
+    try {
+      const selected = await open({
+        directory: true,
+        multiple: false,
+        title: "Select folder to add",
+        ...(startPath ? { defaultPath: startPath } : {}),
+      });
+      if (!selected) return; // Cancelled: leave the chooser open.
+      await acceptFolder(selected as string);
     } catch (err) {
       cb.onError(errorMessage(err));
     }
-  }, [cb]);
+  }, [cb, acceptFolder]);
+
+  /** Accept a hand-typed path once the backend confirms it is a folder. */
+  const useTypedPath = useCallback(async (input: string) => {
+    try {
+      await acceptFolder(await resolveFolderPath(input));
+    } catch (err) {
+      setPathError(errorMessage(err));
+    }
+  }, [acceptFolder]);
+
+  const cancelPickLocation = useCallback(() => { setPicking(false); setPathError(null); }, []);
 
   const cancelAddFolder = useCallback(() => { setPendingFolder(null); setProbe(null); }, []);
 
@@ -158,6 +203,13 @@ export function useVaultManager(cb: VaultManagerCallbacks) {
     unlockTarget,
     setUnlockTarget,
     onPickFolder,
+    picking,
+    volumes,
+    volumesLoading,
+    pathError,
+    browseFrom,
+    useTypedPath,
+    cancelPickLocation,
     cancelAddFolder,
     onAddPlainFolder,
     onCreateVault,

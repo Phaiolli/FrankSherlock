@@ -65,7 +65,7 @@ WEBKIT_DISABLE_DMABUF_RENDERER=1 GDK_BACKEND=wayland,x11 npm run tauri:dev
 | `vault.rs` | Secret folders: gocryptfs-encrypted roots. Converts a folder into `<parent>/.<name>.vault`, mounts it at the original path while unlocked, locks (unmounts + hides) at startup/exit. Thumbnails, face crops and the sealed DB index (`index.json`) of a vault live inside the mount (`<root>/.frank_sherlock/`); while locked the vault's `files` rows are blanked with `secure_delete`. Removed vaults can be reopened via "Add folder" (probe/attach) |
 | `organize.rs` | "Organize by People": moves files with recognised faces into `<root>/Pessoas/<Name>/` (copies when several people), updating DB rows, thumbnails and cloned face rows in place; prunes emptied folders |
 | `runtime.rs` | Ollama/nvidia-smi status gathering |
-| `platform/` | OS abstraction: clipboard, GPU detection, Python venv paths, executable lookup, gocryptfs mount/unmount (`vault_fs.rs`, Linux/macOS; Windows reports unsupported) |
+| `platform/` | OS abstraction: clipboard, GPU detection, Python venv paths, executable lookup, gocryptfs mount/unmount (`vault_fs.rs`, Linux/macOS; Windows reports unsupported), mounted volume discovery for the Add Folder picker (`volumes.rs`) |
 
 ## Architecture Principles
 

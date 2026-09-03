@@ -5,6 +5,7 @@ import type {
   OrganizeResult,
   VaultProbe,
   VaultSupport,
+  VolumeInfo,
   ClusterResult,
   DbStats,
   DeleteFilesResult,
@@ -95,6 +96,16 @@ export async function getVaultSupport(): Promise<VaultSupport> {
 
 export async function organizeRootByPeople(rootId: number): Promise<OrganizeResult> {
   return invoke<OrganizeResult>("organize_root_by_people", { rootId });
+}
+
+/** Mounted disks to offer as browse starting points ("+" -> Add folder). */
+export async function listVolumes(): Promise<VolumeInfo[]> {
+  return invoke<VolumeInfo[]>("list_volumes");
+}
+
+/** Validate a hand-typed folder path; resolves to its canonical form. */
+export async function resolveFolderPath(path: string): Promise<string> {
+  return invoke<string>("resolve_folder_path", { path });
 }
 
 export async function probeVault(folderPath: string): Promise<VaultProbe> {

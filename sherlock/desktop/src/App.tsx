@@ -41,6 +41,7 @@ import ModelInfoModal from "./components/modals/ModelInfoModal";
 import CreateAlbumModal from "./components/modals/CreateAlbumModal";
 import CreateSmartFolderModal from "./components/modals/CreateSmartFolderModal";
 import AddFolderModal from "./components/modals/AddFolderModal";
+import PickLocationModal from "./components/modals/PickLocationModal";
 import UnlockVaultModal from "./components/modals/UnlockVaultModal";
 import OrganizeModal from "./components/modals/OrganizeModal";
 import { useToast } from "./hooks/useToast";
@@ -632,6 +633,16 @@ export default function App() {
       {showHelp && <HelpModal onClose={() => setShowHelp(false)} />}
       {showModelInfo && runtime && (
         <ModelInfoModal runtime={runtime} setup={setup} onClose={() => setShowModelInfo(false)} />
+      )}
+      {vaultManager.picking && !vaultManager.pendingFolder && (
+        <PickLocationModal
+          volumes={vaultManager.volumes}
+          loading={vaultManager.volumesLoading}
+          error={vaultManager.pathError}
+          onCancel={vaultManager.cancelPickLocation}
+          onBrowse={(startPath) => void vaultManager.browseFrom(startPath)}
+          onUsePath={(path) => void vaultManager.useTypedPath(path)}
+        />
       )}
       {vaultManager.pendingFolder && (
         <AddFolderModal

@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import { renderHook, act, waitFor } from "@testing-library/react";
 import { open } from "@tauri-apps/plugin-dialog";
 import { useVaultManager } from "../../hooks/useVaultManager";
-import { attachVault, createVault, getVaultSupport, lockVault, probeVault, unlockVault } from "../../api";
+import { attachVault, createVault, getVaultSupport, listVolumes, lockVault, probeVault, resolveFolderPath, unlockVault } from "../../api";
 import { mockVaultRoot } from "../fixtures";
 
 vi.mock("../../api", async (importOriginal) => {
@@ -10,6 +10,8 @@ vi.mock("../../api", async (importOriginal) => {
   return {
     ...actual,
     getVaultSupport: vi.fn(),
+    listVolumes: vi.fn(),
+    resolveFolderPath: vi.fn(),
     probeVault: vi.fn(),
     attachVault: vi.fn(),
     createVault: vi.fn(),
@@ -28,9 +30,20 @@ describe("useVaultManager", () => {
   };
   const readySetup = { isReady: true } as never;
 
+  /** Open the location chooser and go straight through the system dialog. */
+  async function pickAndBrowse(result: { current: ReturnType<typeof useVaultManager> }, startPath?: string) {
+    await act(async () => { await result.current.onPickFolder(readySetup, false); });
+    await act(async () => { await result.current.browseFrom(startPath); });
+  }
+
   beforeEach(() => {
     vi.clearAllMocks();
     vi.mocked(getVaultSupport).mockResolvedValue({ supported: true, reason: null });
+    vi.mocked(listVolumes).mockResolvedValue([
+      { name: "Home", path: "/home/user", kind: "home" },
+      { name: "arquivos", path: "/mnt/arquivos", kind: "drive" },
+    ]);
+    vi.mocked(resolveFolderPath).mockImplementation(async (path: string) => path);
     vi.mocked(createVault).mockResolvedValue({ rootId: 7, rootPath: "/home/user/secret", migratedFiles: 3 });
     vi.mocked(probeVault).mockResolvedValue({ attachable: false, mountPoint: null, cipherDir: null });
     vi.mocked(attachVault).mockResolvedValue({ rootId: 8, rootPath: "/home/user/secret", migratedFiles: 12 });
@@ -46,7 +59,7 @@ describe("useVaultManager", () => {
 
   it("picking a folder opens the add-folder modal instead of scanning", async () => {
     const { result } = renderHook(() => useVaultManager(callbacks));
-    await act(async () => { await result.current.onPickFolder(readySetup, false); });
+    await pickAndBrowse(result);
     expect(result.current.pendingFolder).toBe("/home/user/secret");
     expect(probeVault).toHaveBeenCalledWith("/home/user/secret");
     expect(result.current.probe).toEqual({ attachable: false, mountPoint: null, cipherDir: null });
@@ -57,7 +70,7 @@ describe("useVaultManager", () => {
     vi.mocked(probeVault).mockResolvedValue({ attachable: true, mountPoint: "/home/user/secret", cipherDir: "/home/user/.secret.vault" });
     vi.mocked(open).mockResolvedValue("/home/user/.secret.vault");
     const { result } = renderHook(() => useVaultManager(callbacks));
-    await act(async () => { await result.current.onPickFolder(readySetup, false); });
+    await pickAndBrowse(result);
     expect(result.current.probe?.attachable).toBe(true);
     let err: string | null = "unset";
     await act(async () => { err = await result.current.onAttachVault("hunter2"); });
@@ -72,7 +85,7 @@ describe("useVaultManager", () => {
   it("attach errors are returned inline", async () => {
     vi.mocked(attachVault).mockRejectedValue("Incorrect password");
     const { result } = renderHook(() => useVaultManager(callbacks));
-    await act(async () => { await result.current.onPickFolder(readySetup, false); });
+    await pickAndBrowse(result);
     let err: string | null = null;
     await act(async () => { err = await result.current.onAttachVault("nope"); });
     expect(err).toBe("Incorrect password");
@@ -88,9 +101,60 @@ describe("useVaultManager", () => {
     expect(callbacks.onError).toHaveBeenCalledWith(expect.stringContaining("Setup is incomplete"));
   });
 
-  it("adding a plain folder scans it and closes the modal", async () => {
+  it("picking lists the mounted disks before opening any dialog", async () => {
     const { result } = renderHook(() => useVaultManager(callbacks));
     await act(async () => { await result.current.onPickFolder(readySetup, false); });
+    expect(result.current.picking).toBe(true);
+    expect(result.current.volumes.map((v) => v.path)).toEqual(["/home/user", "/mnt/arquivos"]);
+    expect(open).not.toHaveBeenCalled();
+  });
+
+  it("choosing a disk opens the dialog inside that mount point", async () => {
+    const { result } = renderHook(() => useVaultManager(callbacks));
+    await pickAndBrowse(result, "/mnt/arquivos");
+    expect(open).toHaveBeenCalledWith(expect.objectContaining({ directory: true, defaultPath: "/mnt/arquivos" }));
+    expect(result.current.picking).toBe(false);
+  });
+
+  it("a volume listing failure still leaves browsing available", async () => {
+    vi.mocked(listVolumes).mockRejectedValue(new Error("no /proc/mounts"));
+    const { result } = renderHook(() => useVaultManager(callbacks));
+    await act(async () => { await result.current.onPickFolder(readySetup, false); });
+    expect(result.current.picking).toBe(true);
+    expect(result.current.volumes).toEqual([]);
+  });
+
+  it("cancelling the system dialog keeps the chooser open", async () => {
+    vi.mocked(open).mockResolvedValue(null);
+    const { result } = renderHook(() => useVaultManager(callbacks));
+    await pickAndBrowse(result);
+    expect(result.current.picking).toBe(true);
+    expect(result.current.pendingFolder).toBeNull();
+  });
+
+  it("a typed path is resolved by the backend and accepted", async () => {
+    vi.mocked(resolveFolderPath).mockResolvedValue("/mnt/trabalho/fotos");
+    const { result } = renderHook(() => useVaultManager(callbacks));
+    await act(async () => { await result.current.onPickFolder(readySetup, false); });
+    await act(async () => { await result.current.useTypedPath("~/../../mnt/trabalho/fotos"); });
+    expect(result.current.pendingFolder).toBe("/mnt/trabalho/fotos");
+    expect(result.current.picking).toBe(false);
+    expect(probeVault).toHaveBeenCalledWith("/mnt/trabalho/fotos");
+  });
+
+  it("an invalid typed path shows inline and keeps the chooser open", async () => {
+    vi.mocked(resolveFolderPath).mockRejectedValue("Path not found: /mnt/nope");
+    const { result } = renderHook(() => useVaultManager(callbacks));
+    await act(async () => { await result.current.onPickFolder(readySetup, false); });
+    await act(async () => { await result.current.useTypedPath("/mnt/nope"); });
+    expect(result.current.pathError).toBe("Path not found: /mnt/nope");
+    expect(result.current.picking).toBe(true);
+    expect(result.current.pendingFolder).toBeNull();
+  });
+
+  it("adding a plain folder scans it and closes the modal", async () => {
+    const { result } = renderHook(() => useVaultManager(callbacks));
+    await pickAndBrowse(result);
     await act(async () => { await result.current.onAddPlainFolder(); });
     expect(callbacks.scanPath).toHaveBeenCalledWith("/home/user/secret");
     expect(result.current.pendingFolder).toBeNull();
@@ -98,7 +162,7 @@ describe("useVaultManager", () => {
 
   it("creating a vault encrypts, scans the new root and notifies", async () => {
     const { result } = renderHook(() => useVaultManager(callbacks));
-    await act(async () => { await result.current.onPickFolder(readySetup, false); });
+    await pickAndBrowse(result);
     let err: string | null = "unset";
     await act(async () => { err = await result.current.onCreateVault("hunter2"); });
     expect(err).toBeNull();
@@ -111,7 +175,7 @@ describe("useVaultManager", () => {
   it("returns backend errors from createVault and keeps the modal open", async () => {
     vi.mocked(createVault).mockRejectedValue(new Error("gocryptfs is not installed"));
     const { result } = renderHook(() => useVaultManager(callbacks));
-    await act(async () => { await result.current.onPickFolder(readySetup, false); });
+    await pickAndBrowse(result);
     let err: string | null = null;
     await act(async () => { err = await result.current.onCreateVault("hunter2"); });
     expect(err).toBe("gocryptfs is not installed");
