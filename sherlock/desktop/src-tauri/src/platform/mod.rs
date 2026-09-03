@@ -1,5 +1,6 @@
 pub mod clipboard;
 pub mod gpu;
+pub mod gst;
 pub mod paths;
 pub mod process;
 pub mod python;

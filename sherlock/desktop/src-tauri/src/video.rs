@@ -73,8 +73,9 @@ pub fn extract_metadata(video_path: &Path) -> Option<VideoMetadata> {
     let ffprobe = ffprobe_path()?;
     let output = silent_command(ffprobe)
         .args([
+            // Not `quiet`: the failure branch below logs stderr.
             "-v",
-            "quiet",
+            "error",
             "-print_format",
             "json",
             "-show_format",

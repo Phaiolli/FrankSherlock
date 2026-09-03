@@ -1852,6 +1852,11 @@ fn spawn_scan_worker_if_needed(
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // Before anything spawns a thread or touches WebKit: inside an AppImage the
+    // runtime hides the host's GStreamer plugins, and WebKit aborts the web
+    // process when a <video> starts. See platform::gst.
+    platform::gst::repair_plugin_path();
+
     let (paths, read_only) = resolve_paths()
         .and_then(|paths| {
             let dirs_ok = prepare_dirs(&paths).is_ok();

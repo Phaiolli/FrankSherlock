@@ -2287,14 +2287,6 @@ fn search_images_normalized(
     let mut items = Vec::new();
     for item in rows {
         let item = item?;
-        if items.len() < 3 {
-            log::info!(
-                "[search_debug] id={} rel_path={} thumb_path={:?}",
-                item.id,
-                item.rel_path,
-                item.thumbnail_path
-            );
-        }
         items.push(item);
     }
 
