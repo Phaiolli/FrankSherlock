@@ -84,13 +84,15 @@ pub fn repair_plugin_path() {
             continue;
         }
         match rebuild_path(current.as_deref(), SYSTEM_PLUGIN_DIRS, has_plugins) {
+            // This runs before the log plugin is installed, so it goes
+            // straight to stderr (the journal picks it up).
             Some(path) if Some(&path) != current.as_ref() => {
-                log::info!("AppImage: {var} -> {path}");
+                eprintln!("[gst] AppImage: {var} -> {path}");
                 std::env::set_var(var, &path);
             }
             Some(_) => {}
             None => {
-                log::warn!("AppImage: no GStreamer plugins found; clearing {var}");
+                eprintln!("[gst] AppImage: no GStreamer plugins found; clearing {var}");
                 std::env::remove_var(var);
             }
         }
